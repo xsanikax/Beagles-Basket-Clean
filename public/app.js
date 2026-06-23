@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "94";
+const APP_VERSION = "95";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -110,10 +110,6 @@ async function saveSharedState(){
 function syncNow(){
   if(location.protocol==="file:")return;
   if(sharedFingerprint()===lastPushedFingerprint)return;
-  const payload={type:"replaceState",clientId,clientMutation:localMutation,updatedAt:Date.now(),state:sharedStateSnapshot()};
-  if(liveSocketReady&&liveSocket?.readyState===WebSocket.OPEN){
-    try{liveSocket.send(JSON.stringify(payload));lastPushedFingerprint=sharedFingerprint();sharedReady=true;return;}catch{}
-  }
   saveSharedState();
 }
 async function pullSharedState({force=false}={}){
