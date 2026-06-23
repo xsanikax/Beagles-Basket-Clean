@@ -1,5 +1,6 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "97";
+const APP_VERSION = "98";
+const ACTION_QUEUE_KEY = "beagles-basket-action-queue-v1";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -33,13 +34,14 @@ const $ = s => document.querySelector(s);
 const isMobileViewport=()=>globalThis.matchMedia?.("(max-width: 800px)")?.matches??((globalThis.innerWidth||1024)<=800);
 const normalize = s => s.toLowerCase().trim().replace(/^\d+\s*/,"");
 const infoFor = name => catalog[normalize(name)] || ["Other","🛒"];
+function loadActionQueue(){try{return JSON.parse(localStorage.getItem(ACTION_QUEUE_KEY)||"[]").filter(action=>action&&action.type&&action.actionId);}catch{return [];}}
 let sharedReady=false;
 let sharedRevision=0;
 const CLIENT_ID_KEY="beagles-basket-client-id";
 const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
 let deferredRemote=null;
-let actionQueue=[];
+let actionQueue=loadActionQueue();
 let actionSending=false;
 let actionRetryTimer;
 let liveSocket=null;
@@ -47,6 +49,17 @@ let liveSocketReady=false;
 let localMutation=0;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
+const persistActionQueue=()=>localStorage.setItem(ACTION_QUEUE_KEY,JSON.stringify(actionQueue.slice(-80)));
+function compactPricePayload(payload={}){
+  const compact=clone(payload);
+  if(compact.productCatalog)compact.productCatalog={morrisons:{}};
+  for(const store of Object.keys(compact.priceSources||{})){
+    for(const key of Object.keys(compact.priceSources[store]||{})){
+      if(Array.isArray(compact.priceSources[store][key]?.options))delete compact.priceSources[store][key].options;
+    }
+  }
+  return compact;
+}
 function sharedStateSnapshot(){
   const outgoing=clone(state);
   outgoing.productCatalog={morrisons:{}};
@@ -72,6 +85,7 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   return true;
 }
 function afterLocalAction(type,payload={}){
+  if(type==="mergePriceData")payload=compactPricePayload(payload);
   state._localUpdatedAt=Date.now();
   state._lastLocalAction=type;
   state._clientId=clientId;
@@ -81,7 +95,14 @@ function afterLocalAction(type,payload={}){
 }
 function enqueueAction(type,payload={}){
   if(location.protocol==="file:")return;
-  actionQueue.push({type,payload,actionId:makeId(),clientId,clientMutation:localMutation,createdAt:Date.now()});
+  const action={type,payload,actionId:makeId(),clientId,clientMutation:localMutation,createdAt:Date.now()};
+  if(type==="mergePriceData")actionQueue.push(action);
+  else{
+    const priceIndex=actionQueue.findIndex(item=>item.type==="mergePriceData");
+    if(priceIndex>=0)actionQueue.splice(priceIndex,0,action);
+    else actionQueue.push(action);
+  }
+  persistActionQueue();
   flushActions();
 }
 function scheduleActionRetry(delay){
@@ -98,8 +119,12 @@ async function flushActions(){
       const action=actionQueue[0];
       const response=await fetch("/api/action",{method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify(action)});
       const remote=await response.json().catch(()=>null);
-      if(!response.ok)throw new Error(remote?.error||"Shared action failed");
+      if(!response.ok){
+        if(action.type==="mergePriceData"){console.warn("Dropping background price sync",remote?.error||response.status);actionQueue.shift();persistActionQueue();continue;}
+        throw new Error(remote?.error||"Shared action failed");
+      }
       actionQueue.shift();
+      persistActionQueue();
       applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
     }
     if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
