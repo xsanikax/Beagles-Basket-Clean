@@ -49,7 +49,7 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
   if(revision<=sharedRevision&&!allowDuringQueue)return false;
-  if((actionQueue.length||actionSending)&&!allowDuringQueue){deferredRemote=remote;return false;}
+  if(actionSending&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
   sharedReady=true;
@@ -61,7 +61,7 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
 function afterLocalAction(type,payload={}){
   state._localUpdatedAt=Date.now();
   saveLocal();
-  enqueueAction(type,payload);
+  enqueueAction(type,{...payload,state:clone(state)});
 }
 function enqueueAction(type,payload={}){
   if(location.protocol==="file:")return;
@@ -129,7 +129,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{if(!actionQueue.length&&!actionSending)pullSharedState();else flushActions();},1500);}
+async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{pullSharedState();if(actionQueue.length)flushActions();},1500);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
