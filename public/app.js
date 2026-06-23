@@ -1,5 +1,6 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "98";
+const APP_VERSION = "99";
+const PENDING_STATE_KEY = "beagles-basket-pending-state-v1";
 const ACTION_QUEUE_KEY = "beagles-basket-action-queue-v1";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -34,32 +35,21 @@ const $ = s => document.querySelector(s);
 const isMobileViewport=()=>globalThis.matchMedia?.("(max-width: 800px)")?.matches??((globalThis.innerWidth||1024)<=800);
 const normalize = s => s.toLowerCase().trim().replace(/^\d+\s*/,"");
 const infoFor = name => catalog[normalize(name)] || ["Other","🛒"];
-function loadActionQueue(){try{return JSON.parse(localStorage.getItem(ACTION_QUEUE_KEY)||"[]").filter(action=>action&&action.type&&action.actionId);}catch{return [];}}
+function loadPendingSnapshot(){try{return JSON.parse(localStorage.getItem(PENDING_STATE_KEY)||"null");}catch{return null;}}
 let sharedReady=false;
 let sharedRevision=0;
 const CLIENT_ID_KEY="beagles-basket-client-id";
 const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
 let deferredRemote=null;
-let actionQueue=loadActionQueue();
-let actionSending=false;
-let actionRetryTimer;
+let publishInFlight=false;
+let publishDirty=false;
+let publishTimer;
 let liveSocket=null;
 let liveSocketReady=false;
 let localMutation=0;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
-const persistActionQueue=()=>localStorage.setItem(ACTION_QUEUE_KEY,JSON.stringify(actionQueue.slice(-80)));
-function compactPricePayload(payload={}){
-  const compact=clone(payload);
-  if(compact.productCatalog)compact.productCatalog={morrisons:{}};
-  for(const store of Object.keys(compact.priceSources||{})){
-    for(const key of Object.keys(compact.priceSources[store]||{})){
-      if(Array.isArray(compact.priceSources[store][key]?.options))delete compact.priceSources[store][key].options;
-    }
-  }
-  return compact;
-}
 function sharedStateSnapshot(){
   const outgoing=clone(state);
   outgoing.productCatalog={morrisons:{}};
@@ -70,12 +60,11 @@ function sharedStateSnapshot(){
   }
   return outgoing;
 }
-function actionPayloadBase(){return {clientId,createdAt:Date.now()};}
-function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
+function applyRemoteState(remote,{quiet=true}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
-  if(revision<=sharedRevision&&!allowDuringQueue)return false;
-  if((actionQueue.length||actionSending)&&!allowDuringQueue){deferredRemote=remote;return false;}
+  if(revision<=sharedRevision)return false;
+  if(publishInFlight||publishDirty){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
   sharedReady=true;
@@ -85,65 +74,54 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   return true;
 }
 function afterLocalAction(type,payload={}){
-  if(type==="mergePriceData")payload=compactPricePayload(payload);
   state._localUpdatedAt=Date.now();
   state._lastLocalAction=type;
   state._clientId=clientId;
   state._clientMutation=++localMutation;
   saveLocal();
-  enqueueAction(type,payload);
+  publishDirty=true;
+  localStorage.setItem(PENDING_STATE_KEY,JSON.stringify({state:sharedStateSnapshot(),clientMutation:localMutation,updatedAt:Date.now()}));
+  schedulePublish(0);
 }
-function enqueueAction(type,payload={}){
+function schedulePublish(delay=0){
   if(location.protocol==="file:")return;
-  const action={type,payload,actionId:makeId(),clientId,clientMutation:localMutation,createdAt:Date.now()};
-  if(type==="mergePriceData")actionQueue.push(action);
-  else{
-    const priceIndex=actionQueue.findIndex(item=>item.type==="mergePriceData");
-    if(priceIndex>=0)actionQueue.splice(priceIndex,0,action);
-    else actionQueue.push(action);
-  }
-  persistActionQueue();
-  flushActions();
+  clearTimeout(publishTimer);
+  publishTimer=setTimeout(publishLatestState,delay);
 }
-function scheduleActionRetry(delay){
+async function publishLatestState(){
   if(location.protocol==="file:")return;
-  clearTimeout(actionRetryTimer);
-  actionRetryTimer=setTimeout(flushActions,delay);
-}
-async function flushActions(){
-  if(location.protocol==="file:")return;
-  if(actionSending||!actionQueue.length)return;
-  actionSending=true;
+  if(publishInFlight)return;
+  const pending=loadPendingSnapshot();
+  if(!publishDirty&&!pending)return;
+  publishInFlight=true;
+  publishDirty=false;
+  const snapshot=pending?.state?pending.state:sharedStateSnapshot();
+  const clientMutation=pending?.clientMutation||localMutation;
   try{
-    while(actionQueue.length){
-      const action=actionQueue[0];
-      const response=await fetch("/api/action",{method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify(action)});
-      const remote=await response.json().catch(()=>null);
-      if(!response.ok){
-        if(action.type==="mergePriceData"){console.warn("Dropping background price sync",remote?.error||response.status);actionQueue.shift();persistActionQueue();continue;}
-        throw new Error(remote?.error||"Shared action failed");
-      }
-      actionQueue.shift();
-      persistActionQueue();
-      applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
-    }
-    if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
+    const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,clientMutation,updatedAt:Date.now(),state:snapshot})});
+    const remote=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(remote?.error||"Shared publish failed");
+    const latestPending=loadPendingSnapshot();
+    if(!latestPending||latestPending.clientMutation===clientMutation)localStorage.removeItem(PENDING_STATE_KEY);
+    if(!publishDirty)applyRemoteState(remote,{quiet:true});
   }catch(error){
-    console.warn("Shared action failed",error);
-    scheduleActionRetry(900);
+    console.warn("Shared publish failed",error);
+    publishDirty=true;
+    schedulePublish(900);
   }finally{
-    actionSending=false;
-    if(actionQueue.length)scheduleActionRetry(0);
+    publishInFlight=false;
+    if(publishDirty||loadPendingSnapshot())schedulePublish(0);
+    else if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
   }
 }
 function syncNow(){
   if(location.protocol==="file:")return;
-  flushActions();
+  publishLatestState();
 }
 async function seedSharedState(){
   const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:sharedStateSnapshot()})});
   const remote=await response.json().catch(()=>null);
-  if(response.ok&&remote?.state)applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
+  if(response.ok&&remote?.state)applyRemoteState(remote,{quiet:true});
 }
 async function pullSharedState({force=false}={}){
   if(location.protocol==="file:")return;
@@ -166,7 +144,6 @@ function connectLiveState(){
       try{
         const data=JSON.parse(event.data||"{}");
         if(data.ack)return;
-        if(data.lastAction?.clientId===clientId)return;
         if(data.state)applyRemoteState(data,{quiet:true});
       }catch{}
     });
@@ -183,7 +160,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!actionQueue.length&&!actionSending)pullSharedState();},1000);}
+async function initSharedState(){localStorage.removeItem(ACTION_QUEUE_KEY);if(loadPendingSnapshot())publishDirty=true;await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!publishDirty&&!publishInFlight)pullSharedState();},1000);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
