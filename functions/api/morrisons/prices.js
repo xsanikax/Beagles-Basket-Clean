@@ -88,8 +88,8 @@ function productScore(query, product, index = 0) {
 
 function rankProducts(query, products) {
   return products
-    .filter((product) => product && product.name && Number.isFinite(Number(product.price)))
-    .map((product, index) => ({ ...product, price: Number(product.price), score: productScore(query, product, index) }))
+    .filter((product) => product && product.name)
+    .map((product, index) => ({ ...product, price: Number.isFinite(Number(product.price)) ? Number(product.price) : null, score: productScore(query, product, index) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, MAX_PRODUCTS_PER_SEARCH)
     .map(({ score, searchTerms, ...product }) => product);
