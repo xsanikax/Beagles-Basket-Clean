@@ -1,4 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
+const APP_VERSION = "84";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -44,8 +45,19 @@ let actionRetryTimer;
 let deferredRemote=null;
 let snapshotSending=false;
 let snapshotPending=false;
+let snapshotRetryTimer;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
+function sharedStateSnapshot(){
+  const outgoing=clone(state);
+  outgoing.productCatalog={morrisons:{}};
+  for(const store of Object.keys(outgoing.priceSources||{})){
+    for(const key of Object.keys(outgoing.priceSources[store]||{})){
+      if(Array.isArray(outgoing.priceSources[store][key]?.options))delete outgoing.priceSources[store][key].options;
+    }
+  }
+  return outgoing;
+}
 function actionPayloadBase(){return {clientId,createdAt:Date.now()};}
 function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
@@ -73,10 +85,11 @@ function queueSnapshotPush(){
 async function pushSharedSnapshot(){
   if(snapshotSending||location.protocol==="file:")return;
   snapshotSending=true;
+  let retryLater=false;
   try{
     while(snapshotPending){
       snapshotPending=false;
-      const outgoing=clone(state);
+      const outgoing=sharedStateSnapshot();
       const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:outgoing})});
       const remote=await response.json().catch(()=>null);
       if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
@@ -85,10 +98,12 @@ async function pushSharedSnapshot(){
   }catch(error){
     console.warn("Shared state save failed",error);
     snapshotPending=true;
-    setTimeout(pushSharedSnapshot,900);
+    retryLater=true;
+    clearTimeout(snapshotRetryTimer);
+    snapshotRetryTimer=setTimeout(pushSharedSnapshot,900);
   }finally{
     snapshotSending=false;
-    if(snapshotPending)setTimeout(pushSharedSnapshot,0);
+    if(snapshotPending&&!retryLater)setTimeout(pushSharedSnapshot,0);
   }
 }
 function enqueueAction(type,payload={}){
@@ -261,10 +276,9 @@ document.addEventListener("change",e=>{if(!e.target.matches(".check"))return;con
 $("#clear-bought").addEventListener("click",()=>{const ids=state.items.filter(i=>i.done).map(i=>i.id);state.items=state.items.filter(i=>!i.done);afterLocalAction("clearBought",{ids});render();toast("Bought items cleared")});
 $("#add-all").addEventListener("click",()=>predict().forEach(r=>addItem(r.name)));
 $("#finish-trip").addEventListener("click",()=>{const bought=state.items.filter(i=>i.done);if(!bought.length){toast("Tick off items as you shop first");return}const now=Date.now();const boughtIds=bought.map(i=>i.id);bought.forEach(i=>{const source=state.priceSources[state.selectedStore]?.[normalize(i.name)];state.history.push({name:i.name,boughtAt:now,store:state.selectedStore,price:unitPrice(i),productName:source?.productName||null})});state.items=state.items.filter(i=>!i.done);state.trips++;afterLocalAction("completeQuest",{ids:boughtIds,now,store:state.selectedStore});render();toast("Trip saved everywhere — predictions updated")});
-$("#greeting").textContent="A shared shopping adventure";if(isMobileViewport()){$("#add-submit-icon").textContent="⌕";$("#add-submit-label").textContent="Search";}render();
-if(location.protocol!=="file:"){
-  initSharedState().then(()=>{if(state.selectedStore==="morrisons"&&!state.lastMorrisonsRefresh)refreshMorrisonsPrices();});
-}
+globalThis.BEAGLES_BASKET_VERSION=APP_VERSION;
+$("#greeting").textContent=`A shared shopping adventure · v${APP_VERSION}`;if(isMobileViewport()){$("#add-submit-icon").textContent="⌕";$("#add-submit-label").textContent="Search";}render();
+if(location.protocol!=="file:")initSharedState();
 function updateAppHeight(){document.documentElement?.style.setProperty("--app-height",`${globalThis.visualViewport?.height||globalThis.innerHeight||800}px`)}
 updateAppHeight();globalThis.visualViewport?.addEventListener?.("resize",updateAppHeight);globalThis.addEventListener?.("orientationchange",updateAppHeight);
 if("serviceWorker" in navigator&&(location.protocol==="https:"||location.hostname==="127.0.0.1"||location.hostname==="localhost"))navigator.serviceWorker.register("/service-worker.js").catch(()=>{});
