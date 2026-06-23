@@ -1,6 +1,8 @@
 import { CATALOG } from "../../_catalog.js";
 
 const MORRISONS_SEARCH = "https://groceries.morrisons.com/search?q=";
+const MAX_PRODUCTS_PER_SEARCH = 160;
+const MAX_SUBLOCATION_SEARCHES = 10;
 const json = (value, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
@@ -52,6 +54,20 @@ function parseProducts(html) {
   return products;
 }
 
+function parseSublocationSearches(html) {
+  const seen = new Set();
+  const paths = [];
+  const pattern = /href="(\/search\?q=[^"]*sublocationId=[^"]+)"/g;
+  for (const match of html.matchAll(pattern)) {
+    const path = decodeHtml(match[1]).replace(/&amp;/g, "&");
+    if (seen.has(path)) continue;
+    seen.add(path);
+    paths.push(path);
+    if (paths.length >= MAX_SUBLOCATION_SEARCHES) break;
+  }
+  return paths;
+}
+
 const aliases = {
   vape: ["vape", "e liquid", "eliquid", "pod", "nicotine"],
   "vape juice": ["vape", "e liquid", "eliquid", "pod", "nicotine"],
@@ -75,7 +91,7 @@ function rankProducts(query, products) {
     .filter((product) => product && product.name && Number.isFinite(Number(product.price)))
     .map((product, index) => ({ ...product, price: Number(product.price), score: productScore(query, product, index) }))
     .sort((a, b) => b.score - a.score)
-    .slice(0, 40)
+    .slice(0, MAX_PRODUCTS_PER_SEARCH)
     .map(({ score, searchTerms, ...product }) => product);
 }
 
@@ -84,7 +100,7 @@ function cachedMatches(query) {
     .map((product, index) => ({ ...product, score: productScore(query, product, index) }))
     .filter((product) => product.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 40)
+    .slice(0, MAX_PRODUCTS_PER_SEARCH)
     .map(({ score, searchTerms, ...product }) => product);
 }
 
@@ -98,15 +114,29 @@ function mergeProducts(primary, secondary) {
   });
 }
 
-async function fetchMorrisons(query) {
-  const response = await fetch(`${MORRISONS_SEARCH}${encodeURIComponent(query)}`, {
+async function fetchMorrisonsPage(url) {
+  const response = await fetch(url, {
     headers: {
       "user-agent": "Mozilla/5.0 (compatible; BeaglesBasket/1.0; personal price lookup)",
       accept: "text/html,application/xhtml+xml",
     },
   });
   if (!response.ok) throw new Error(`Morrisons returned ${response.status}`);
-  return parseProducts(await response.text());
+  return response.text();
+}
+
+async function fetchMorrisons(query) {
+  const searchUrl = `${MORRISONS_SEARCH}${encodeURIComponent(query)}`;
+  const html = await fetchMorrisonsPage(searchUrl);
+  const products = parseProducts(html);
+  const sublocationPaths = parseSublocationSearches(html);
+  const sublocationPages = await Promise.allSettled(
+    sublocationPaths.map((path) => fetchMorrisonsPage(new URL(path, "https://groceries.morrisons.com").toString())),
+  );
+  for (const page of sublocationPages) {
+    if (page.status === "fulfilled") products.push(...parseProducts(page.value));
+  }
+  return products;
 }
 
 async function searchMorrisons(query) {
