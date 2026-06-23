@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "91";
+const APP_VERSION = "92";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -128,7 +128,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!saveInFlight&&sharedFingerprint()===lastPushedFingerprint)pullSharedState();},1000);}
+async function initSharedState(){lastPushedFingerprint=sharedFingerprint();await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!saveInFlight&&sharedFingerprint()===lastPushedFingerprint)pullSharedState();},1000);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
