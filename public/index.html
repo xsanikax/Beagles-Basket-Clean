@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1d27" />
+  <title>Beagle's Basket</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Beagle's Basket" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=5" />
+  <link rel="stylesheet" href="rpg-theme.css?v=2" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#"><span class="brand-mark">BB</span><span>Beagle's Basket</span></a>
+      <div class="household"><span class="avatars"><b>Y</b><b>H</b></span><span>You & Her</span><span class="chevron">⌄</span></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow" id="greeting">A shared shopping adventure</p>
+          <h1>The Quest For<br><em>Provisions</em></h1>
+          <p class="subtitle">A living quest log that remembers your supplies, learns your rhythm and keeps the whole party in sync.</p>
+        </div>
+        <div class="hero-orbit" aria-hidden="true"><div class="orbit-card">🥛<span>Milk</span><small>Due today</small></div><i></i><i></i></div>
+      </section>
+
+      <section class="add-panel">
+        <form id="add-form" autocomplete="off">
+          <label for="item-input">Search the market</label>
+          <div class="add-row">
+            <input id="item-input" placeholder="Name an item for the quest..." inputmode="search" enterkeyhint="search" autocapitalize="sentences" required />
+            <button class="primary" id="add-submit" type="submit"><span id="add-submit-icon">+</span> <span id="add-submit-label">Add item</span></button>
+          </div>
+          <div class="product-picker" id="product-picker" hidden>
+            <div class="picker-heading"><div><span id="picker-title">Choose your provision</span><small>Remembered for the next quest</small></div><button type="button" id="close-product-picker" aria-label="Back to shopping list"><span aria-hidden="true">&larr;</span> Back</button></div>
+            <div id="product-options" role="listbox" aria-label="Morrisons product matches"></div>
+          </div>
+        </form>
+        <div class="quick-row" id="quick-row"></div>
+      </section>
+
+      <section class="content-grid">
+        <div class="list-column">
+          <div class="section-heading">
+            <div><p class="eyebrow">Active quest</p><h2>Supply Scroll <span id="item-count">0</span></h2></div>
+            <div class="progress-wrap"><span id="progress-label">0% complete</span><div class="progress"><i id="progress-bar"></i></div></div>
+          </div>
+          <div class="store-bar">
+            <div><label for="store-select">Chosen merchant</label><select id="store-select"><option value="morrisons">Morrisons Gamston</option><option value="asda">Asda West Bridgford</option></select></div>
+            <span id="price-source"><i></i> Morrisons online prices</span>
+            <button type="button" id="refresh-prices">↻ Refresh prices</button>
+          </div>
+          <div class="filters" id="filters">
+            <button class="active" data-filter="all">All Loot</button>
+            <button data-filter="Produce">Harvest</button>
+            <button data-filter="Dairy">Dairy</button>
+            <button data-filter="Pantry">Pantry</button>
+          </div>
+          <div class="shopping-list" id="shopping-list"></div>
+          <div class="basket-summary"><div><span id="total-store">Morrisons estimate</span><small id="priced-status">0 of 0 items priced</small></div><strong id="basket-total">£0.00</strong></div>
+          <div class="list-footer"><button class="text-button" id="clear-bought">Discard collected loot</button><button class="shop-button" id="finish-trip">Complete Quest <span>→</span></button></div>
+        </div>
+
+        <aside>
+          <div class="insight-card">
+            <div class="insight-top"><div class="spark">?</div><span class="learning"><i></i> Oracle is learning</span></div>
+            <p class="eyebrow">Oracle's picks</p>
+            <h2>Supplies Running Low</h2>
+            <p class="muted">Predicted from the rhythm of your previous quests.</p>
+            <details class="learning-note"><summary>How the oracle learns</summary><p>Completed purchases teach the prediction model. Each finished quest records intervals, frequency and consistency, sharpening future supply predictions.</p></details>
+            <div id="recommendations" class="recommendations"></div>
+            <button class="add-all" id="add-all">Accept All Side Quests</button>
+          </div>
+          <div class="stat-card">
+            <div><span>Quests cleared</span><strong id="trip-stat">8</strong></div>
+            <div><span>Supplies learned</span><strong id="memory-stat">24</strong></div>
+            <p>Every completed quest grants knowledge to the oracle.</p>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <section class="mobile-sheet" id="mobile-sheet" hidden><div class="mobile-sheet-head"><h2 id="mobile-sheet-title"></h2><button id="close-mobile-sheet" aria-label="Close">×</button></div><div id="mobile-sheet-content"></div></section>
+    <nav class="mobile-nav"><button class="active" data-mobile-view="list">Quest</button><button data-mobile-view="history">Chronicle</button><button data-mobile-view="settings">Guild</button></nav>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="app.js?v=40"></script>
+</body>
+</html>

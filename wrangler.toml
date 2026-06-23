@@ -1,0 +1,11 @@
+name = "beagles-basket"
+compatibility_date = "2026-06-23"
+pages_build_output_dir = "public"
+
+# Optional: Cloudflare dashboard binding is usually easier.
+# If you use this file as the source of truth for Pages settings,
+# this Durable Object must already exist from the beagles-basket-realtime Worker.
+[[durable_objects.bindings]]
+name = "BASKET_ROOM"
+class_name = "BasketRoom"
+script_name = "beagles-basket-realtime-workar"
