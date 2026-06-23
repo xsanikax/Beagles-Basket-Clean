@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "88";
+const APP_VERSION = "89";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -60,7 +60,6 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
   if(revision<=sharedRevision&&!allowDuringQueue)return false;
-  if(remote.lastAction?.clientId===clientId){sharedRevision=revision;sharedReady=true;return false;}
   if((saveInFlight||localDirty)&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
