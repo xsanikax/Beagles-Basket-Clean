@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "84";
+const APP_VERSION = "85";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -63,7 +63,7 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
   if(revision<=sharedRevision&&!allowDuringQueue)return false;
-  if(actionSending&&!allowDuringQueue){deferredRemote=remote;return false;}
+  if((actionSending||snapshotSending||snapshotPending)&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
   sharedReady=true;
@@ -93,7 +93,8 @@ async function pushSharedSnapshot(){
       const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:outgoing})});
       const remote=await response.json().catch(()=>null);
       if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
-      applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
+      sharedRevision=Number(remote?.revision)||sharedRevision;
+      sharedReady=true;
     }
   }catch(error){
     console.warn("Shared state save failed",error);
