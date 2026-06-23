@@ -32,11 +32,91 @@ const $ = s => document.querySelector(s);
 const isMobileViewport=()=>globalThis.matchMedia?.("(max-width: 800px)")?.matches??((globalThis.innerWidth||1024)<=800);
 const normalize = s => s.toLowerCase().trim().replace(/^\d+\s*/,"");
 const infoFor = name => catalog[normalize(name)] || ["Other","🛒"];
-let sharedReady=false;let sharedRevision=0;let sharedPushTimer;let pushingShared=false;let sharedPushPending=false;let hasLocalMutation=false;
-const save=()=>{state._localUpdatedAt=Date.now();hasLocalMutation=true;localStorage.setItem(STORAGE_KEY,JSON.stringify(state));if(location.protocol!=="file:")queueSharedPush();};
-function queueSharedPush(delay=120){sharedPushPending=true;clearTimeout(sharedPushTimer);sharedPushTimer=setTimeout(pushSharedState,delay);}
-function applyRemoteState(remote,{quiet=false}={}){if(!remote?.state)return false;if(hasLocalMutation||pushingShared||sharedPushPending)return false;const localCatalog=state.productCatalog;state=repairStateData(remote.state);state.productCatalog=localCatalog&&Object.keys(localCatalog.morrisons||{}).length?localCatalog:state.productCatalog;sharedRevision=Number(remote.revision)||0;sharedReady=true;localStorage.setItem(STORAGE_KEY,JSON.stringify(state));render();if(!quiet)toast("Shared list updated");return true;}
-async function pushSharedState(){if(location.protocol==="file:")return;if(pushingShared){sharedPushPending=true;return;}pushingShared=true;sharedPushPending=false;try{const outgoing=clone(state);const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({revision:sharedRevision,state:outgoing})});const result=await response.json().catch(()=>({error:"Invalid JSON response"}));if(response.ok){sharedRevision=Number(result.revision)||sharedRevision;sharedReady=true;hasLocalMutation=false;localStorage.setItem(STORAGE_KEY,JSON.stringify(state));}else if(response.status===409&&result.state){sharedRevision=Number(result.revision)||sharedRevision;if(hasLocalMutation){queueSharedPush(100);return;}applyRemoteState(result);}else{console.warn("Shared list push rejected",result);queueSharedPush(1000);}}catch(error){console.warn("Shared list push failed",error);queueSharedPush(1000);}finally{pushingShared=false;if(sharedPushPending)queueSharedPush();}}
+let sharedReady=false;
+let sharedRevision=0;
+const CLIENT_ID_KEY="beagles-basket-client-id";
+const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
+localStorage.setItem(CLIENT_ID_KEY,clientId);
+let actionQueue=[];
+let actionSending=false;
+let deferredRemote=null;
+const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
+const save=saveLocal;
+function actionPayloadBase(){return {clientId,createdAt:Date.now()};}
+function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
+  if(!remote?.state)return false;
+  const revision=Number(remote.revision)||0;
+  if(revision<=sharedRevision&&!allowDuringQueue)return false;
+  if((actionQueue.length||actionSending)&&!allowDuringQueue){deferredRemote=remote;return false;}
+  state=repairStateData(remote.state);
+  sharedRevision=revision;
+  sharedReady=true;
+  saveLocal();
+  render();
+  if(!quiet)toast("Shared list updated");
+  return true;
+}
+function afterLocalAction(type,payload={}){
+  state._localUpdatedAt=Date.now();
+  saveLocal();
+  enqueueAction(type,payload);
+}
+function enqueueAction(type,payload={}){
+  if(location.protocol==="file:")return;
+  actionQueue.push({type,payload,actionId:makeId(),...actionPayloadBase()});
+  flushActions();
+}
+async function flushActions(){
+  if(actionSending||location.protocol==="file:")return;
+  actionSending=true;
+  try{
+    while(actionQueue.length){
+      const action=actionQueue[0];
+      let response,result;
+      try{
+        response=await fetch("/api/action",{method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify(action)});
+        result=await response.json().catch(()=>({error:"Invalid JSON response"}));
+      }catch(error){
+        console.warn("Realtime action failed",action,error);
+        setTimeout(flushActions,600);
+        return;
+      }
+      if(!response.ok){
+        console.warn("Realtime action rejected",action,result);
+        setTimeout(flushActions,900);
+        return;
+      }
+      actionQueue.shift();
+      applyRemoteState(result,{quiet:true,allowDuringQueue:true});
+    }
+    if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
+  }finally{
+    actionSending=false;
+    if(actionQueue.length)setTimeout(flushActions,0);
+  }
+}
+async function pullSharedState({force=false}={}){
+  if(location.protocol==="file:")return;
+  try{
+    const response=await fetch("/api/state",{cache:"no-store",headers:{"cache-control":"no-cache"}});
+    if(!response.ok){console.warn("Shared list pull rejected",await response.text());return;}
+    const remote=await response.json();
+    if(remote.state){applyRemoteState(remote,{quiet:true});}
+    else if(force){saveLocal();enqueueAction("initState",{state:clone(state)});}
+    sharedReady=true;
+  }catch(error){console.warn("Shared list pull failed",error);sharedReady=false;}
+}
+function connectLiveState(){
+  if(location.protocol==="file:"||!globalThis.EventSource)return;
+  const events=new EventSource("/api/state/events");
+  events.onmessage=event=>{
+    try{const data=JSON.parse(event.data||"{}");if(data.state)applyRemoteState(data,{quiet:true});else pullSharedState();}
+    catch{pullSharedState();}
+  };
+  events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
+  events.onopen=()=>{sharedReady=true;};
+}
+async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{if(!actionQueue.length&&!actionSending)pullSharedState();else flushActions();},1500);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
@@ -54,8 +134,8 @@ async function refreshMorrisonsPrices(silent=false){
     const data=await response.json();let updated=0;
     for(const result of data.results){if(!result.ok||!result.products.length)continue;const key=normalize(result.query);rememberProducts(result.products,result.updatedAt,result.sourceUrl);const previous=state.productSelections.morrisons[key]||state.priceSources.morrisons[key]?.productName;const match=result.products.find(product=>product.name===previous)||result.products.find(product=>/^morrisons\b/i.test(product.name))||result.products[0];state.productSelections.morrisons[key]=match.name;state.prices.morrisons[key]=match.price;state.priceSources.morrisons[key]={productName:match.name,size:match.size,updatedAt:result.updatedAt,sourceUrl:result.sourceUrl,options:result.products,resultVersion:3,imageVersion:2};updated++;}
     if(!updated)throw new Error("No Morrisons matches were returned");
-    state.lastMorrisonsRefresh=Date.now();delete state.lastMorrisonsError;save();render();if(!silent)toast(`${updated} Morrisons price${updated===1?"":"s"} updated`);
-  }catch(error){state.lastMorrisonsError=error.message;save();render();toast("Morrisons prices could not be matched — try refresh again");}
+    state.lastMorrisonsRefresh=Date.now();delete state.lastMorrisonsError;saveLocal();afterLocalAction("mergePriceData",{prices:state.prices,priceSources:state.priceSources,productCatalog:state.productCatalog,productSelections:state.productSelections,lastMorrisonsRefresh:state.lastMorrisonsRefresh,lastMorrisonsError:null});render();if(!silent)toast(`${updated} Morrisons price${updated===1?"":"s"} updated`);
+  }catch(error){state.lastMorrisonsError=error.message;saveLocal();afterLocalAction("mergePriceData",{prices:state.prices,priceSources:state.priceSources,productCatalog:state.productCatalog,productSelections:state.productSelections,lastMorrisonsRefresh:state.lastMorrisonsRefresh||null,lastMorrisonsError:state.lastMorrisonsError});render();toast("Morrisons prices could not be matched — try refresh again");}
   finally{button.disabled=false;button.textContent="↻ Refresh prices";}
 }
 
@@ -69,13 +149,18 @@ function predict(){
     return {name:name.replace(/\b\w/g,c=>c.toUpperCase()),score,avg:Math.round(avg),due:Math.round(avg-daysSince),icon:infoFor(name)[1]};
   }).filter(Boolean).filter(r=>!state.items.some(i=>!i.done&&normalize(i.name)===normalize(r.name))).sort((a,b)=>b.score-a.score).slice(0,3);
 }
+function pricePatchForKey(key){return {key,prices:state.prices,priceSources:state.priceSources,productCatalog:state.productCatalog,productSelections:state.productSelections,lastMorrisonsRefresh:state.lastMorrisonsRefresh||null,lastMorrisonsError:state.lastMorrisonsError||null};}
 function addItem(raw,chosenProduct=null){
   const match=raw.trim().match(/^(\d+)\s+(.+)$/); const name=(match?.[2]||raw).trim(); if(!name)return;
   const key=normalize(name);const cached=state.priceSources.morrisons[key];const existing=state.items.find(i=>!i.done&&normalize(i.name)===key);const amount=Math.max(1,Number.parseInt(match?.[1]||"1",10)||1);
-  if(existing){if(chosenProduct){state.productSelections.morrisons[key]=chosenProduct.name;state.prices.morrisons[key]=chosenProduct.price;state.priceSources.morrisons[key]={productName:chosenProduct.name,size:chosenProduct.size,updatedAt:Date.now(),sourceUrl:cached?.sourceUrl||`https://groceries.morrisons.com/search?q=${encodeURIComponent(name)}`,options:cached?.options||pickerResults,resultVersion:cached?.resultVersion||3,imageVersion:cached?.imageVersion||2};rememberProducts(cached?.options||pickerResults,Date.now(),state.priceSources.morrisons[key].sourceUrl);}existing.qty=String(numericQty(existing.qty)+amount);save();render();toast(`${name} quantity increased to ${existing.qty}`);return;}
-  if(!chosenProduct&&state.selectedStore==="morrisons"&&cached?.options?.length){const selected=state.productSelections.morrisons[key]||cached.productName;chosenProduct=cached.options.find(product=>product.name===selected)||cached.options.find(product=>/^morrisons\b/i.test(product.name))||cached.options[0];}
-  if(chosenProduct&&state.selectedStore==="morrisons"){state.productSelections.morrisons[key]=chosenProduct.name;state.prices.morrisons[key]=chosenProduct.price;state.priceSources.morrisons[key]={productName:chosenProduct.name,size:chosenProduct.size,updatedAt:Date.now(),sourceUrl:`https://groceries.morrisons.com/search?q=${encodeURIComponent(name)}`,options:cached?.options||pickerResults,resultVersion:cached?.resultVersion||3,imageVersion:cached?.imageVersion||2};rememberProducts(cached?.options||pickerResults,Date.now(),state.priceSources.morrisons[key].sourceUrl);}
-  state.items.unshift({id:makeId(),name:name.replace(/^./,c=>c.toUpperCase()),category:infoFor(name)[0],qty:String(amount),done:false,addedBy:"You"});save();render();toast(`${name} added${state.selectedStore==="morrisons"&&!state.priceSources.morrisons[key]&&location.protocol!=="file:"?" · checking Morrisons…":""}`);queueMorrisonsRefresh(name);
+  let itemForAction=null;
+  if(existing){
+    if(chosenProduct){state.productSelections.morrisons[key]=chosenProduct.name;state.prices.morrisons[key]=chosenProduct.price;state.priceSources.morrisons[key]={productName:chosenProduct.name,size:chosenProduct.size,updatedAt:Date.now(),sourceUrl:cached?.sourceUrl||`https://groceries.morrisons.com/search?q=${encodeURIComponent(name)}`,options:cached?.options||pickerResults,resultVersion:cached?.resultVersion||3,imageVersion:cached?.imageVersion||2};rememberProducts(cached?.options||pickerResults,Date.now(),state.priceSources.morrisons[key].sourceUrl);}
+    existing.qty=String(numericQty(existing.qty)+amount);itemForAction=clone(existing);afterLocalAction("addItem",{name,key,amount,item:itemForAction,chosenProduct,pricePatch:pricePatchForKey(key)});render();toast(`${name} quantity increased to ${existing.qty}`);return;
+  }
+  const item={id:makeId(),name:name.replace(/^./,c=>c.toUpperCase()),category:infoFor(name)[0],qty:String(amount),done:false,addedBy:"You"};
+  if(chosenProduct){state.productSelections.morrisons[key]=chosenProduct.name;state.prices.morrisons[key]=chosenProduct.price;state.priceSources.morrisons[key]={productName:chosenProduct.name,size:chosenProduct.size,updatedAt:Date.now(),sourceUrl:cached?.sourceUrl||`https://groceries.morrisons.com/search?q=${encodeURIComponent(name)}`,options:cached?.options||pickerResults,resultVersion:cached?.resultVersion||3,imageVersion:cached?.imageVersion||2};rememberProducts(cached?.options||pickerResults,Date.now(),state.priceSources.morrisons[key].sourceUrl);}
+  state.items.unshift(item);afterLocalAction("addItem",{name,key,amount,item:clone(item),chosenProduct,pricePatch:pricePatchForKey(key)});render();toast(`${name} added${state.selectedStore==="morrisons"&&!state.priceSources.morrisons[key]&&location.protocol!=="file:"?" · checking Morrisons…":""}`);queueMorrisonsRefresh(name);
 }
 function render(){
   const visible=state.items.filter(i=>filter==="all"||i.category===filter); const done=state.items.filter(i=>i.done).length; const pct=state.items.length?Math.round(done/state.items.length*100):0;
@@ -96,15 +181,6 @@ function renderMobileSheet(view){
   if(view==="history"){const events=[...state.history].sort((a,b)=>b.boughtAt-a.boughtAt).slice(0,60);$("#mobile-sheet-content").innerHTML=events.length?events.map(event=>`<div class="history-entry"><strong>${escapeHtml(event.productName||event.name)}</strong><span>${new Date(event.boughtAt).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})}${event.store?` · ${event.store==="morrisons"?"Morrisons":"Asda"}`:""}</span>${event.price!=null?`<b>${money(event.price)}</b>`:""}</div>`).join(""):'<p class="muted">Completed purchases will appear here.</p>';return;}
   const cached=Object.keys(state.productCatalog.morrisons).length;$("#mobile-sheet-content").innerHTML=`<div class="settings-block"><strong>Shared household</strong><p>${sharedReady?"Connected to the shared cloud list. Changes sync in real time.":"Connecting to the shared cloud list…"}</p></div><div class="settings-block"><strong>Price catalogue</strong><p>${cached} Morrisons products remembered on this device. Selected products and list data are shared.</p><button class="settings-action" data-mobile-refresh>Refresh Morrisons prices</button></div><div class="settings-block"><strong>Current shop</strong><p>${state.selectedStore==="morrisons"?"Morrisons Gamston":"Asda West Bridgford"}</p></div>`;
 }
-async function pullSharedState({force=false}={}){if(location.protocol==="file:"||pushingShared||sharedPushPending||hasLocalMutation)return;try{const response=await fetch("/api/state",{cache:"no-store",headers:{"cache-control":"no-cache"}});if(!response.ok){console.warn("Shared list pull rejected",await response.text());return;}const remote=await response.json();if(remote.state&&(force||Number(remote.revision)>sharedRevision)){applyRemoteState(remote,{quiet:true});}else if(!remote.state&&!sharedReady){sharedReady=true;queueSharedPush(50);}sharedReady=true;}catch(error){console.warn("Shared list pull failed",error);}}
-function connectLiveState(){
-  if(location.protocol==="file:"||!globalThis.EventSource)return;
-  const events=new EventSource("/api/state/events");
-  events.onmessage=()=>pullSharedState({force:true});
-  events.onerror=()=>{setTimeout(()=>pullSharedState({force:true}),1500);};
-  events.onopen=()=>{sharedReady=true;};
-}
-async function initSharedState(){await pullSharedState({force:true});sharedReady=true;connectLiveState();setInterval(()=>pullSharedState({force:true}),2000);}
 let pickerTimer;let pickerRequest=0;let pickerResults=[];let pickerQuery="";let pickerHistoryActive=false;
 function showProductPicker(){const picker=$("#product-picker");picker.hidden=false;document.body?.classList.add("picker-open");if(isMobileViewport()){dismissSearchKeyboard();if(!pickerHistoryActive&&globalThis.history?.pushState){globalThis.history.pushState({beaglesBasketPicker:true},"",globalThis.location.href);pickerHistoryActive=true;}}}
 function hideProductPicker(fromHistory=false){const wasOpen=!$("#product-picker").hidden;$("#product-picker").hidden=true;document.body?.classList.remove("picker-open");pickerResults=[];pickerQuery="";if(wasOpen&&pickerHistoryActive){pickerHistoryActive=false;if(!fromHistory)globalThis.history?.back?.();}}
@@ -115,15 +191,15 @@ async function findProductsForInput(raw){
   const query=raw.trim().replace(/^\d+\s*/,"");if(query.length<2||state.selectedStore!=="morrisons"||location.protocol==="file:"){hideProductPicker();return;}
   const savedSource=state.priceSources.morrisons[normalize(query)];const cached=savedSource?.options;if(savedSource?.resultVersion>=3&&savedSource?.imageVersion>=2&&cached?.length){renderProductPicker(query,cached);return;}
   const request=++pickerRequest;pickerQuery=query;$("#product-options").innerHTML='<div class="picker-loading">Checking Morrisons…</div>';showProductPicker();
-  try{const response=await fetch("/api/morrisons/prices",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({items:[query]})});const data=await response.json();if(request!==pickerRequest)return;const result=data.results?.[0];if(!result?.ok||!result.products?.length)throw new Error("No matches");rememberProducts(result.products,result.updatedAt,result.sourceUrl);state.priceSources.morrisons[normalize(query)]={productName:savedSource?.productName||"",size:savedSource?.size||"",updatedAt:result.updatedAt,sourceUrl:result.sourceUrl,options:result.products,resultVersion:3,imageVersion:2};save();renderProductPicker(query,result.products);}catch(error){if(request===pickerRequest){$("#product-options").innerHTML='<div class="picker-empty">Morrisons search is unavailable. Try Refresh prices.</div>';showProductPicker();}}
+  try{const response=await fetch("/api/morrisons/prices",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({items:[query]})});const data=await response.json();if(request!==pickerRequest)return;const result=data.results?.[0];if(!result?.ok||!result.products?.length)throw new Error("No matches");rememberProducts(result.products,result.updatedAt,result.sourceUrl);state.priceSources.morrisons[normalize(query)]={productName:savedSource?.productName||"",size:savedSource?.size||"",updatedAt:result.updatedAt,sourceUrl:result.sourceUrl,options:result.products,resultVersion:3,imageVersion:2};saveLocal();afterLocalAction("mergePriceData",{prices:state.prices,priceSources:state.priceSources,productCatalog:state.productCatalog,productSelections:state.productSelections,lastMorrisonsRefresh:state.lastMorrisonsRefresh||null,lastMorrisonsError:state.lastMorrisonsError||null});renderProductPicker(query,result.products);}catch(error){if(request===pickerRequest){$("#product-options").innerHTML='<div class="picker-empty">Morrisons search is unavailable. Try Refresh prices.</div>';showProductPicker();}}
 }
 function editPrice(item){
   const key=normalize(item.name);const source=state.priceSources[state.selectedStore]?.[key];
   if(state.selectedStore==="morrisons"&&source?.options?.length){
     const choices=source.options.map((option,index)=>`${index+1}. ${option.name}${option.size?` (${option.size})`:""} — ${money(option.price)}`).join("\n");
-    const selected=prompt(`Choose the Morrisons product for ${item.name}:\n\n${choices}\n\nEnter its number:`,"1");if(selected===null)return;const option=source.options[Number.parseInt(selected,10)-1];if(!option){toast("Choose a number from the list");return;}state.productSelections.morrisons[key]=option.name;state.prices.morrisons[key]=option.price;state.priceSources.morrisons[key]={...source,productName:option.name,size:option.size};save();render();toast("Morrisons product matched");return;
+    const selected=prompt(`Choose the Morrisons product for ${item.name}:\n\n${choices}\n\nEnter its number:`,"1");if(selected===null)return;const option=source.options[Number.parseInt(selected,10)-1];if(!option){toast("Choose a number from the list");return;}state.productSelections.morrisons[key]=option.name;state.prices.morrisons[key]=option.price;state.priceSources.morrisons[key]={...source,productName:option.name,size:option.size};afterLocalAction("setProductSelection",{store:state.selectedStore,key,option,source:state.priceSources.morrisons[key],prices:state.prices,priceSources:state.priceSources,productSelections:state.productSelections,productCatalog:state.productCatalog});render();toast("Morrisons product matched");return;
   }
-  const current=unitPrice(item);const entered=prompt(`Unit price for ${item.name} at ${state.selectedStore==="morrisons"?"Morrisons Gamston":"Asda West Bridgford"} (£)`,current??"");if(entered===null)return;const value=Number.parseFloat(entered.replace("£","").trim());if(Number.isFinite(value)&&value>=0){state.prices[state.selectedStore][key]=value;delete state.priceSources[state.selectedStore][key];save();render();toast("Price book updated")}else toast("Enter a valid price");
+  const current=unitPrice(item);const entered=prompt(`Unit price for ${item.name} at ${state.selectedStore==="morrisons"?"Morrisons Gamston":"Asda West Bridgford"} (£)`,current??"");if(entered===null)return;const value=Number.parseFloat(entered.replace("£","").trim());if(Number.isFinite(value)&&value>=0){state.prices[state.selectedStore][key]=value;delete state.priceSources[state.selectedStore][key];afterLocalAction("setManualPrice",{store:state.selectedStore,key,price:value,prices:state.prices,priceSources:state.priceSources});render();toast("Price book updated")}else toast("Enter a valid price");
 }
 const dismissSearchKeyboard=()=>$("#item-input").blur?.();
 $("#item-input").addEventListener("input",e=>{clearTimeout(pickerTimer);if(!isMobileViewport())pickerTimer=setTimeout(()=>findProductsForInput(e.target.value),350)});
@@ -133,17 +209,17 @@ $("#product-options").addEventListener("touchstart",dismissSearchKeyboard,{passi
 $("#product-options").addEventListener("scroll",dismissSearchKeyboard,{passive:true});
 $("#close-product-picker").addEventListener("click",()=>{dismissSearchKeyboard();hideProductPicker()});
 $("#add-form").addEventListener("submit",e=>{e.preventDefault();const raw=$("#item-input").value;if(isMobileViewport()){findProductsForInput(raw);return;}const key=normalize(raw.replace(/^\d+\s*/,""));const selected=state.productSelections.morrisons[key];const product=pickerResults.find(option=>option.name===selected)||pickerResults.find(option=>/^morrisons\b/i.test(option.name))||pickerResults[0]||null;addItem(raw,product);e.target.reset();hideProductPicker()});
-globalThis.addEventListener?.("popstate",()=>{if(pickerHistoryActive){pickerHistoryActive=false;hideProductPicker(true);}});
-document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("#product-picker").hidden){dismissSearchKeyboard();hideProductPicker();}});
+$("#clear-search").addEventListener("click",()=>{$("#item-input").value="";hideProductPicker();$("#item-input").focus()});
+$("#picker-close").addEventListener("click",()=>hideProductPicker());
+globalThis.addEventListener?.("popstate",()=>{if(pickerHistoryActive)hideProductPicker(true)});
 let pickerTouchStart=null;$("#product-picker").addEventListener("touchstart",e=>{const touch=e.touches?.[0];if(touch)pickerTouchStart={x:touch.clientX,y:touch.clientY};},{passive:true});$("#product-picker").addEventListener("touchend",e=>{const touch=e.changedTouches?.[0];if(!touch||!pickerTouchStart)return;const dx=touch.clientX-pickerTouchStart.x;const dy=touch.clientY-pickerTouchStart.y;pickerTouchStart=null;if(dx>80&&Math.abs(dy)<60)hideProductPicker();},{passive:true});
-document.addEventListener("click",e=>{const t=e.target.closest("button")||e.target;if(t.dataset.mobileView){renderMobileSheet(t.dataset.mobileView);return}if(t.dataset.mobileRefresh!==undefined){refreshMorrisonsPrices(false);renderMobileSheet("settings");return}if(t.dataset.pickerIndex!==undefined){const product=pickerResults[Number(t.dataset.pickerIndex)];if(product){const raw=$("#item-input").value||pickerQuery;addItem(raw,product);$("#add-form").reset();hideProductPicker()}return}if(t.dataset.quick)addItem(t.dataset.quick);if(t.dataset.add)addItem(t.dataset.add);if(t.dataset.qtyChange){const item=state.items.find(i=>i.id===t.dataset.itemId);if(item){item.qty=String(Math.max(1,numericQty(item.qty)+Number(t.dataset.qtyChange)));save();render()}return}if(t.dataset.delete){const item=state.items.find(i=>i.id===t.dataset.delete);state.items=state.items.filter(i=>i.id!==t.dataset.delete);save();render();toast(`${item?.name||"Item"} removed from the list`);return}if(t.dataset.price)editPrice(state.items.find(i=>i.id===t.dataset.price));if(t.dataset.filter){filter=t.dataset.filter;document.querySelectorAll("[data-filter]").forEach(b=>b.classList.toggle("active",b===t));render()}});
-$("#close-mobile-sheet").addEventListener("click",()=>renderMobileSheet("list"));
-$("#store-select").addEventListener("change",e=>{state.selectedStore=e.target.value;save();render();toast(`Showing ${e.target.selectedOptions[0].text} prices`)});
+document.addEventListener("click",e=>{const t=e.target.closest("button")||e.target;if(t.dataset.mobileView){renderMobileSheet(t.dataset.mobileView);return}if(t.dataset.mobileRefresh!==undefined){refreshMorrisonsPrices(false);renderMobileSheet("settings");return}if(t.dataset.pickerIndex!==undefined){const product=pickerResults[Number(t.dataset.pickerIndex)];if(product){const raw=$("#item-input").value||pickerQuery;addItem(raw,product);$("#add-form").reset();hideProductPicker()}return}if(t.dataset.quick){addItem(t.dataset.quick);return}if(t.dataset.add){addItem(t.dataset.add);return}if(t.dataset.qtyChange){const item=state.items.find(i=>i.id===t.dataset.itemId);if(item){item.qty=String(Math.max(1,numericQty(item.qty)+Number(t.dataset.qtyChange)));afterLocalAction("setQty",{id:item.id,qty:item.qty});render()}return}if(t.dataset.delete){const item=state.items.find(i=>i.id===t.dataset.delete);state.items=state.items.filter(i=>i.id!==t.dataset.delete);afterLocalAction("deleteItem",{id:t.dataset.delete});render();toast(`${item?.name||"Item"} removed from the list`);return}if(t.dataset.price){editPrice(state.items.find(i=>i.id===t.dataset.price));return}if(t.dataset.filter){filter=t.dataset.filter;document.querySelectorAll("[data-filter]").forEach(b=>b.classList.toggle("active",b===t));render();return}});
+$("#store-select").addEventListener("change",e=>{state.selectedStore=e.target.value;afterLocalAction("setSelectedStore",{selectedStore:state.selectedStore});render();toast(`Showing ${e.target.selectedOptions[0].text} prices`)});
 $("#refresh-prices").addEventListener("click",()=>refreshMorrisonsPrices(false));
-document.addEventListener("change",e=>{if(!e.target.matches(".check"))return;const item=state.items.find(i=>i.id===e.target.dataset.id);item.done=e.target.checked;save();render()});
-$("#clear-bought").addEventListener("click",()=>{state.items=state.items.filter(i=>!i.done);save();render();toast("Bought items cleared")});
+document.addEventListener("change",e=>{if(!e.target.matches(".check"))return;const item=state.items.find(i=>i.id===e.target.dataset.id);if(!item)return;item.done=e.target.checked;afterLocalAction("setDone",{id:item.id,done:item.done});render()});
+$("#clear-bought").addEventListener("click",()=>{const ids=state.items.filter(i=>i.done).map(i=>i.id);state.items=state.items.filter(i=>!i.done);afterLocalAction("clearBought",{ids});render();toast("Bought items cleared")});
 $("#add-all").addEventListener("click",()=>predict().forEach(r=>addItem(r.name)));
-$("#finish-trip").addEventListener("click",async()=>{clearTimeout(sharedPushTimer);sharedPushPending=false;await pushSharedState();const bought=state.items.filter(i=>i.done);if(!bought.length){toast("Tick off items as you shop first");return}const now=Date.now();bought.forEach(i=>{const source=state.priceSources[state.selectedStore]?.[normalize(i.name)];state.history.push({name:i.name,boughtAt:now,store:state.selectedStore,price:unitPrice(i),productName:source?.productName||null})});state.items=state.items.filter(i=>!i.done);state.trips++;save();render();clearTimeout(sharedPushTimer);sharedPushPending=false;await pushSharedState();toast("Trip saved everywhere — predictions updated")});
+$("#finish-trip").addEventListener("click",()=>{const bought=state.items.filter(i=>i.done);if(!bought.length){toast("Tick off items as you shop first");return}const now=Date.now();const boughtIds=bought.map(i=>i.id);bought.forEach(i=>{const source=state.priceSources[state.selectedStore]?.[normalize(i.name)];state.history.push({name:i.name,boughtAt:now,store:state.selectedStore,price:unitPrice(i),productName:source?.productName||null})});state.items=state.items.filter(i=>!i.done);state.trips++;afterLocalAction("completeQuest",{ids:boughtIds,now,store:state.selectedStore});render();toast("Trip saved everywhere — predictions updated")});
 $("#greeting").textContent="A shared shopping adventure";if(isMobileViewport()){$("#add-submit-icon").textContent="⌕";$("#add-submit-label").textContent="Search";}render();
 if(location.protocol!=="file:"){
   initSharedState().then(()=>{if(state.selectedStore==="morrisons"&&!state.lastMorrisonsRefresh)refreshMorrisonsPrices();});
