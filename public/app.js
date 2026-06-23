@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "93";
+const APP_VERSION = "94";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -159,6 +159,10 @@ const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
 const toast = text => {const el=$("#toast");el.textContent=text;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),1800)};
+let installPrompt=null;
+globalThis.addEventListener?.("beforeinstallprompt",event=>{event.preventDefault();installPrompt=event;$("#install-app").hidden=false;});
+$("#install-app")?.addEventListener("click",async()=>{if(!installPrompt)return;installPrompt.prompt();const choice=await installPrompt.userChoice.catch(()=>null);if(choice?.outcome==="accepted")$("#install-app").hidden=true;installPrompt=null;});
+globalThis.addEventListener?.("appinstalled",()=>{$("#install-app").hidden=true;installPrompt=null;toast("Installed as an app")});
 
 let refreshTimer;
 const queueMorrisonsRefresh=name=>{if(location.protocol==="file:"||state.selectedStore!=="morrisons"||state.priceSources.morrisons[normalize(name)])return;clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>refreshMorrisonsPrices(true),500);};

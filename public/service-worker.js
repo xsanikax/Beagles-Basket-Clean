@@ -1,5 +1,5 @@
-const CACHE="beagles-basket-cloud-v93";
-const SHELL=["/styles.css?v=5","/rpg-theme.css?v=2","/manifest.webmanifest","/icon.svg","/icon-192.png","/icon-512.png"];
+const CACHE="beagles-basket-cloud-v94";
+const SHELL=["/","/index.html","/app.js?v=94","/styles.css?v=6","/rpg-theme.css?v=3","/manifest.webmanifest","/icon.svg","/icon-192.png","/icon-512.png"];
 
 self.addEventListener("install",event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting()));
@@ -14,12 +14,12 @@ self.addEventListener("fetch",event=>{
   const url=new URL(request.url);
   if(request.method!=="GET"||url.pathname.startsWith("/api/"))return;
   if(request.mode==="navigate"){
-    event.respondWith(fetch(request,{cache:"no-store"}).catch(()=>caches.match("/index.html")));
+    event.respondWith(fetch(request,{cache:"no-store"}).then(response=>{const copy=response.clone();caches.open(CACHE).then(cache=>cache.put("/index.html",copy));return response}).catch(()=>caches.match("/index.html")||caches.match("/")));
     return;
   }
   if(url.origin!==location.origin)return;
   if(url.pathname.endsWith("/app.js")||url.pathname.endsWith("/service-worker.js")||url.pathname.endsWith("/index.html")){
-    event.respondWith(fetch(request,{cache:"no-store"}));
+    event.respondWith(fetch(request,{cache:"no-store"}).then(response=>{if(response.ok&&url.pathname.endsWith("/app.js")){const copy=response.clone();caches.open(CACHE).then(cache=>cache.put(request,copy));}return response}).catch(()=>caches.match(request)));
     return;
   }
   event.respondWith(caches.match(request).then(cached=>cached||fetch(request).then(response=>{if(response.ok){const copy=response.clone();caches.open(CACHE).then(cache=>cache.put(request,copy));}return response})));
