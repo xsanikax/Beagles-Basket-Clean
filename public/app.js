@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "86";
+const APP_VERSION = "87";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -38,15 +38,11 @@ let sharedRevision=0;
 const CLIENT_ID_KEY="beagles-basket-client-id";
 const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
-let actionQueue=[];
-let actionSending=false;
-let actionRetryAt=0;
-let actionRetryTimer;
 let deferredRemote=null;
-let snapshotSending=false;
-let snapshotPending=false;
-let snapshotRetryTimer;
-let snapshotDebounceTimer;
+let saveInFlight=false;
+let saveAgain=false;
+let localDirty=false;
+let localDirtySince=0;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
 function sharedStateSnapshot(){
@@ -65,7 +61,7 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   const revision=Number(remote.revision)||0;
   if(revision<=sharedRevision&&!allowDuringQueue)return false;
   if(remote.lastAction?.clientId===clientId){sharedRevision=revision;sharedReady=true;return false;}
-  if((actionSending||snapshotSending||snapshotPending)&&!allowDuringQueue){deferredRemote=remote;return false;}
+  if((saveInFlight||localDirty)&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
   sharedReady=true;
@@ -76,83 +72,32 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
 }
 function afterLocalAction(type,payload={}){
   state._localUpdatedAt=Date.now();
+  localDirty=true;
+  localDirtySince=Date.now();
   saveLocal();
-  queueSnapshotPush();
+  saveSharedState();
 }
-function queueSnapshotPush(){
+async function saveSharedState(){
   if(location.protocol==="file:")return;
-  snapshotPending=true;
-  clearTimeout(snapshotDebounceTimer);
-  snapshotDebounceTimer=setTimeout(pushSharedSnapshot,160);
-}
-async function pushSharedSnapshot(){
-  if(snapshotSending||location.protocol==="file:")return;
-  snapshotSending=true;
-  let retryLater=false;
+  if(saveInFlight){saveAgain=true;return;}
+  saveInFlight=true;
   try{
-    while(snapshotPending){
-      snapshotPending=false;
+    do{
+      saveAgain=false;
       const outgoing=sharedStateSnapshot();
       const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:outgoing})});
       const remote=await response.json().catch(()=>null);
       if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
       sharedRevision=Number(remote?.revision)||sharedRevision;
       sharedReady=true;
-    }
+      localDirty=false;
+    }while(saveAgain);
   }catch(error){
     console.warn("Shared state save failed",error);
-    snapshotPending=true;
-    retryLater=true;
-    clearTimeout(snapshotRetryTimer);
-    snapshotRetryTimer=setTimeout(pushSharedSnapshot,900);
+    setTimeout(saveSharedState,900);
   }finally{
-    snapshotSending=false;
-    if(snapshotPending&&!retryLater)setTimeout(pushSharedSnapshot,0);
-  }
-}
-function enqueueAction(type,payload={}){
-  if(location.protocol==="file:")return;
-  actionQueue.push({type,payload,actionId:makeId(),...actionPayloadBase()});
-  flushActions();
-}
-function scheduleActionRetry(delay){
-  actionRetryAt=Date.now()+delay;
-  clearTimeout(actionRetryTimer);
-  actionRetryTimer=setTimeout(flushActions,delay);
-}
-async function flushActions(){
-  if(actionSending||location.protocol==="file:")return;
-  const wait=actionRetryAt-Date.now();
-  if(wait>0){scheduleActionRetry(wait);return;}
-  actionSending=true;
-  let retryLater=false;
-  try{
-    while(actionQueue.length){
-      const action=actionQueue[0];
-      let response,result;
-      try{
-        response=await fetch("/api/action",{method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify(action)});
-        result=await response.json().catch(()=>({error:"Invalid JSON response"}));
-      }catch(error){
-        console.warn("Realtime action failed",action,error);
-        retryLater=true;
-        scheduleActionRetry(600);
-        return;
-      }
-      if(!response.ok){
-        console.warn("Realtime action rejected",action,result);
-        retryLater=true;
-        scheduleActionRetry(900);
-        return;
-      }
-      actionRetryAt=0;
-      actionQueue.shift();
-      applyRemoteState(result,{quiet:true,allowDuringQueue:true});
-    }
-    if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
-  }finally{
-    actionSending=false;
-    if(actionQueue.length&&!retryLater)setTimeout(flushActions,0);
+    saveInFlight=false;
+    if(saveAgain)setTimeout(saveSharedState,0);
   }
 }
 async function pullSharedState({force=false}={}){
@@ -162,7 +107,7 @@ async function pullSharedState({force=false}={}){
     if(!response.ok){console.warn("Shared list pull rejected",await response.text());return;}
     const remote=await response.json();
     if(remote.state){applyRemoteState(remote,{quiet:true});}
-    else if(force){saveLocal();queueSnapshotPush();}
+    else if(force){saveLocal();afterLocalAction("initState");}
     sharedReady=true;
   }catch(error){console.warn("Shared list pull failed",error);sharedReady=false;}
 }
@@ -176,7 +121,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>pullSharedState(),1000);}
+async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{if(!localDirty||Date.now()-localDirtySince>3000)pullSharedState();},1000);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
