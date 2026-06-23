@@ -1,7 +1,8 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "99";
+const APP_VERSION = "100";
 const PENDING_STATE_KEY = "beagles-basket-pending-state-v1";
 const ACTION_QUEUE_KEY = "beagles-basket-action-queue-v1";
+const SYNC_TIMEOUT = 7000;
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -44,12 +45,19 @@ localStorage.setItem(CLIENT_ID_KEY,clientId);
 let deferredRemote=null;
 let publishInFlight=false;
 let publishDirty=false;
+let publishStartedAt=0;
 let publishTimer;
 let liveSocket=null;
 let liveSocketReady=false;
 let localMutation=0;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
+async function fetchSync(url,options={}){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),SYNC_TIMEOUT);
+  try{return await fetch(url,{...options,signal:controller.signal});}
+  finally{clearTimeout(timer);}
+}
 function sharedStateSnapshot(){
   const outgoing=clone(state);
   outgoing.productCatalog={morrisons:{}};
@@ -90,15 +98,20 @@ function schedulePublish(delay=0){
 }
 async function publishLatestState(){
   if(location.protocol==="file:")return;
-  if(publishInFlight)return;
+  if(publishInFlight){
+    if(Date.now()-publishStartedAt>SYNC_TIMEOUT+1000){publishInFlight=false;publishDirty=true;}
+    else return;
+  }
   const pending=loadPendingSnapshot();
   if(!publishDirty&&!pending)return;
   publishInFlight=true;
+  publishStartedAt=Date.now();
   publishDirty=false;
   const snapshot=pending?.state?pending.state:sharedStateSnapshot();
   const clientMutation=pending?.clientMutation||localMutation;
+  let failed=false;
   try{
-    const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,clientMutation,updatedAt:Date.now(),state:snapshot})});
+    const response=await fetchSync("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,clientMutation,updatedAt:Date.now(),state:snapshot})});
     const remote=await response.json().catch(()=>null);
     if(!response.ok)throw new Error(remote?.error||"Shared publish failed");
     const latestPending=loadPendingSnapshot();
@@ -106,11 +119,12 @@ async function publishLatestState(){
     if(!publishDirty)applyRemoteState(remote,{quiet:true});
   }catch(error){
     console.warn("Shared publish failed",error);
+    failed=true;
     publishDirty=true;
-    schedulePublish(900);
   }finally{
     publishInFlight=false;
-    if(publishDirty||loadPendingSnapshot())schedulePublish(0);
+    publishStartedAt=0;
+    if(publishDirty||loadPendingSnapshot())schedulePublish(failed?900:0);
     else if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
   }
 }
@@ -119,14 +133,14 @@ function syncNow(){
   publishLatestState();
 }
 async function seedSharedState(){
-  const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:sharedStateSnapshot()})});
+  const response=await fetchSync("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:sharedStateSnapshot()})});
   const remote=await response.json().catch(()=>null);
   if(response.ok&&remote?.state)applyRemoteState(remote,{quiet:true});
 }
 async function pullSharedState({force=false}={}){
   if(location.protocol==="file:")return;
   try{
-    const response=await fetch("/api/state",{cache:"no-store",headers:{"cache-control":"no-cache"}});
+    const response=await fetchSync("/api/state",{cache:"no-store",headers:{"cache-control":"no-cache"}});
     if(!response.ok){console.warn("Shared list pull rejected",await response.text());return;}
     const remote=await response.json();
     if(remote.state){applyRemoteState(remote,{quiet:true});}
@@ -160,7 +174,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){localStorage.removeItem(ACTION_QUEUE_KEY);if(loadPendingSnapshot())publishDirty=true;await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!publishDirty&&!publishInFlight)pullSharedState();},1000);}
+async function initSharedState(){localStorage.removeItem(ACTION_QUEUE_KEY);if(loadPendingSnapshot())publishDirty=true;await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!publishDirty&&!publishInFlight)pullSharedState();},1000);globalThis.addEventListener?.("online",()=>schedulePublish(0));document.addEventListener?.("visibilitychange",()=>{if(!document.hidden)schedulePublish(0);});}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
