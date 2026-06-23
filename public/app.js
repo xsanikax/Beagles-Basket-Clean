@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "89";
+const APP_VERSION = "90";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -40,9 +40,9 @@ const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
 let deferredRemote=null;
 let saveInFlight=false;
-let saveAgain=false;
 let localDirty=false;
-let localDirtySince=0;
+let localMutation=0;
+let saveRetryTimer;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
 function sharedStateSnapshot(){
@@ -71,32 +71,37 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
 }
 function afterLocalAction(type,payload={}){
   state._localUpdatedAt=Date.now();
+  state._lastLocalAction=type;
+  state._clientId=clientId;
+  state._clientMutation=++localMutation;
   localDirty=true;
-  localDirtySince=Date.now();
   saveLocal();
-  saveSharedState();
+  scheduleSharedSave(0);
+}
+function scheduleSharedSave(delay){
+  if(location.protocol==="file:")return;
+  clearTimeout(saveRetryTimer);
+  saveRetryTimer=setTimeout(saveSharedState,delay);
 }
 async function saveSharedState(){
   if(location.protocol==="file:")return;
-  if(saveInFlight){saveAgain=true;return;}
+  if(saveInFlight||!localDirty)return;
   saveInFlight=true;
+  const savingMutation=localMutation;
   try{
-    do{
-      saveAgain=false;
-      const outgoing=sharedStateSnapshot();
-      const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:outgoing})});
-      const remote=await response.json().catch(()=>null);
-      if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
-      sharedRevision=Number(remote?.revision)||sharedRevision;
-      sharedReady=true;
-      localDirty=false;
-    }while(saveAgain);
+    const outgoing=sharedStateSnapshot();
+    const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),mutation:savingMutation,state:outgoing})});
+    const remote=await response.json().catch(()=>null);
+    if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
+    sharedRevision=Number(remote?.revision)||sharedRevision;
+    sharedReady=true;
+    if(savingMutation===localMutation)localDirty=false;
   }catch(error){
     console.warn("Shared state save failed",error);
-    setTimeout(saveSharedState,900);
+    scheduleSharedSave(900);
   }finally{
     saveInFlight=false;
-    if(saveAgain)setTimeout(saveSharedState,0);
+    if(localDirty)scheduleSharedSave(0);
   }
 }
 async function pullSharedState({force=false}={}){
@@ -120,7 +125,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{if(!localDirty||Date.now()-localDirtySince>3000)pullSharedState();},1000);}
+async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{if(!localDirty&&!saveInFlight)pullSharedState();},1000);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
