@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "92";
+const APP_VERSION = "93";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -42,6 +42,9 @@ let deferredRemote=null;
 let saveInFlight=false;
 let saveRetryTimer;
 let lastPushedFingerprint="";
+let liveSocket=null;
+let liveSocketReady=false;
+let localMutation=0;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
 function sharedStateSnapshot(){
@@ -74,6 +77,7 @@ function afterLocalAction(type,payload={}){
   state._localUpdatedAt=Date.now();
   state._lastLocalAction=type;
   state._clientId=clientId;
+  state._clientMutation=++localMutation;
   saveLocal();
   syncNow();
 }
@@ -105,7 +109,12 @@ async function saveSharedState(){
 }
 function syncNow(){
   if(location.protocol==="file:")return;
-  if(sharedFingerprint()!==lastPushedFingerprint)saveSharedState();
+  if(sharedFingerprint()===lastPushedFingerprint)return;
+  const payload={type:"replaceState",clientId,clientMutation:localMutation,updatedAt:Date.now(),state:sharedStateSnapshot()};
+  if(liveSocketReady&&liveSocket?.readyState===WebSocket.OPEN){
+    try{liveSocket.send(JSON.stringify(payload));lastPushedFingerprint=sharedFingerprint();sharedReady=true;return;}catch{}
+  }
+  saveSharedState();
 }
 async function pullSharedState({force=false}={}){
   if(location.protocol==="file:")return;
@@ -119,7 +128,24 @@ async function pullSharedState({force=false}={}){
   }catch(error){console.warn("Shared list pull failed",error);sharedReady=false;}
 }
 function connectLiveState(){
-  if(location.protocol==="file:"||!globalThis.EventSource)return;
+  if(location.protocol==="file:")return;
+  if(globalThis.WebSocket){
+    const protocol=location.protocol==="https:"?"wss:":"ws:";
+    liveSocket=new WebSocket(`${protocol}//${location.host}/api/sync`);
+    liveSocket.addEventListener("open",()=>{liveSocketReady=true;sharedReady=true;syncNow();});
+    liveSocket.addEventListener("message",event=>{
+      try{
+        const data=JSON.parse(event.data||"{}");
+        if(data.ack)return;
+        if(data.lastAction?.clientId===clientId&&Number(data.lastAction?.clientMutation||0)<localMutation)return;
+        if(data.state)applyRemoteState(data,{quiet:true,allowDuringQueue:data.lastAction?.clientId===clientId});
+      }catch{}
+    });
+    liveSocket.addEventListener("close",()=>{liveSocketReady=false;setTimeout(connectLiveState,1000);});
+    liveSocket.addEventListener("error",()=>{liveSocketReady=false;try{liveSocket.close();}catch{}});
+    return;
+  }
+  if(!globalThis.EventSource)return;
   const events=new EventSource("/api/state/events");
   events.onmessage=event=>{
     try{const data=JSON.parse(event.data||"{}");if(data.state)applyRemoteState(data,{quiet:true});else pullSharedState();}
