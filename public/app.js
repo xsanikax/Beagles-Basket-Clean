@@ -42,6 +42,8 @@ let actionSending=false;
 let actionRetryAt=0;
 let actionRetryTimer;
 let deferredRemote=null;
+let snapshotSending=false;
+let snapshotPending=false;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
 function actionPayloadBase(){return {clientId,createdAt:Date.now()};}
@@ -61,7 +63,33 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
 function afterLocalAction(type,payload={}){
   state._localUpdatedAt=Date.now();
   saveLocal();
-  enqueueAction(type,{...payload,state:clone(state)});
+  queueSnapshotPush();
+}
+function queueSnapshotPush(){
+  if(location.protocol==="file:")return;
+  snapshotPending=true;
+  pushSharedSnapshot();
+}
+async function pushSharedSnapshot(){
+  if(snapshotSending||location.protocol==="file:")return;
+  snapshotSending=true;
+  try{
+    while(snapshotPending){
+      snapshotPending=false;
+      const outgoing=clone(state);
+      const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:outgoing})});
+      const remote=await response.json().catch(()=>null);
+      if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
+      applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
+    }
+  }catch(error){
+    console.warn("Shared state save failed",error);
+    snapshotPending=true;
+    setTimeout(pushSharedSnapshot,900);
+  }finally{
+    snapshotSending=false;
+    if(snapshotPending)setTimeout(pushSharedSnapshot,0);
+  }
 }
 function enqueueAction(type,payload={}){
   if(location.protocol==="file:")return;
@@ -115,7 +143,7 @@ async function pullSharedState({force=false}={}){
     if(!response.ok){console.warn("Shared list pull rejected",await response.text());return;}
     const remote=await response.json();
     if(remote.state){applyRemoteState(remote,{quiet:true});}
-    else if(force){saveLocal();enqueueAction("initState",{state:clone(state)});}
+    else if(force){saveLocal();queueSnapshotPush();}
     sharedReady=true;
   }catch(error){console.warn("Shared list pull failed",error);sharedReady=false;}
 }
@@ -129,7 +157,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{pullSharedState();if(actionQueue.length)flushActions();},1500);}
+async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>pullSharedState(),1000);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
