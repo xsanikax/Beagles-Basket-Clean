@@ -39,6 +39,8 @@ const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
 let actionQueue=[];
 let actionSending=false;
+let actionRetryAt=0;
+let actionRetryTimer;
 let deferredRemote=null;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
@@ -66,9 +68,17 @@ function enqueueAction(type,payload={}){
   actionQueue.push({type,payload,actionId:makeId(),...actionPayloadBase()});
   flushActions();
 }
+function scheduleActionRetry(delay){
+  actionRetryAt=Date.now()+delay;
+  clearTimeout(actionRetryTimer);
+  actionRetryTimer=setTimeout(flushActions,delay);
+}
 async function flushActions(){
   if(actionSending||location.protocol==="file:")return;
+  const wait=actionRetryAt-Date.now();
+  if(wait>0){scheduleActionRetry(wait);return;}
   actionSending=true;
+  let retryLater=false;
   try{
     while(actionQueue.length){
       const action=actionQueue[0];
@@ -78,21 +88,24 @@ async function flushActions(){
         result=await response.json().catch(()=>({error:"Invalid JSON response"}));
       }catch(error){
         console.warn("Realtime action failed",action,error);
-        setTimeout(flushActions,600);
+        retryLater=true;
+        scheduleActionRetry(600);
         return;
       }
       if(!response.ok){
         console.warn("Realtime action rejected",action,result);
-        setTimeout(flushActions,900);
+        retryLater=true;
+        scheduleActionRetry(900);
         return;
       }
+      actionRetryAt=0;
       actionQueue.shift();
       applyRemoteState(result,{quiet:true,allowDuringQueue:true});
     }
     if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
   }finally{
     actionSending=false;
-    if(actionQueue.length)setTimeout(flushActions,0);
+    if(actionQueue.length&&!retryLater)setTimeout(flushActions,0);
   }
 }
 async function pullSharedState({force=false}={}){
@@ -209,8 +222,8 @@ $("#product-options").addEventListener("touchstart",dismissSearchKeyboard,{passi
 $("#product-options").addEventListener("scroll",dismissSearchKeyboard,{passive:true});
 $("#close-product-picker").addEventListener("click",()=>{dismissSearchKeyboard();hideProductPicker()});
 $("#add-form").addEventListener("submit",e=>{e.preventDefault();const raw=$("#item-input").value;if(isMobileViewport()){findProductsForInput(raw);return;}const key=normalize(raw.replace(/^\d+\s*/,""));const selected=state.productSelections.morrisons[key];const product=pickerResults.find(option=>option.name===selected)||pickerResults.find(option=>/^morrisons\b/i.test(option.name))||pickerResults[0]||null;addItem(raw,product);e.target.reset();hideProductPicker()});
-$("#clear-search").addEventListener("click",()=>{$("#item-input").value="";hideProductPicker();$("#item-input").focus()});
-$("#picker-close").addEventListener("click",()=>hideProductPicker());
+$("#clear-search")?.addEventListener("click",()=>{$("#item-input").value="";hideProductPicker();$("#item-input").focus()});
+$("#picker-close")?.addEventListener("click",()=>hideProductPicker());
 globalThis.addEventListener?.("popstate",()=>{if(pickerHistoryActive)hideProductPicker(true)});
 let pickerTouchStart=null;$("#product-picker").addEventListener("touchstart",e=>{const touch=e.touches?.[0];if(touch)pickerTouchStart={x:touch.clientX,y:touch.clientY};},{passive:true});$("#product-picker").addEventListener("touchend",e=>{const touch=e.changedTouches?.[0];if(!touch||!pickerTouchStart)return;const dx=touch.clientX-pickerTouchStart.x;const dy=touch.clientY-pickerTouchStart.y;pickerTouchStart=null;if(dx>80&&Math.abs(dy)<60)hideProductPicker();},{passive:true});
 document.addEventListener("click",e=>{const t=e.target.closest("button")||e.target;if(t.dataset.mobileView){renderMobileSheet(t.dataset.mobileView);return}if(t.dataset.mobileRefresh!==undefined){refreshMorrisonsPrices(false);renderMobileSheet("settings");return}if(t.dataset.pickerIndex!==undefined){const product=pickerResults[Number(t.dataset.pickerIndex)];if(product){const raw=$("#item-input").value||pickerQuery;addItem(raw,product);$("#add-form").reset();hideProductPicker()}return}if(t.dataset.quick){addItem(t.dataset.quick);return}if(t.dataset.add){addItem(t.dataset.add);return}if(t.dataset.qtyChange){const item=state.items.find(i=>i.id===t.dataset.itemId);if(item){item.qty=String(Math.max(1,numericQty(item.qty)+Number(t.dataset.qtyChange)));afterLocalAction("setQty",{id:item.id,qty:item.qty});render()}return}if(t.dataset.delete){const item=state.items.find(i=>i.id===t.dataset.delete);state.items=state.items.filter(i=>i.id!==t.dataset.delete);afterLocalAction("deleteItem",{id:t.dataset.delete});render();toast(`${item?.name||"Item"} removed from the list`);return}if(t.dataset.price){editPrice(state.items.find(i=>i.id===t.dataset.price));return}if(t.dataset.filter){filter=t.dataset.filter;document.querySelectorAll("[data-filter]").forEach(b=>b.classList.toggle("active",b===t));render();return}});
