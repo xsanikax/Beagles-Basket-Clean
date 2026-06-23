@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "85";
+const APP_VERSION = "86";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -46,6 +46,7 @@ let deferredRemote=null;
 let snapshotSending=false;
 let snapshotPending=false;
 let snapshotRetryTimer;
+let snapshotDebounceTimer;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
 function sharedStateSnapshot(){
@@ -63,6 +64,7 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
   if(revision<=sharedRevision&&!allowDuringQueue)return false;
+  if(remote.lastAction?.clientId===clientId){sharedRevision=revision;sharedReady=true;return false;}
   if((actionSending||snapshotSending||snapshotPending)&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
@@ -80,7 +82,8 @@ function afterLocalAction(type,payload={}){
 function queueSnapshotPush(){
   if(location.protocol==="file:")return;
   snapshotPending=true;
-  pushSharedSnapshot();
+  clearTimeout(snapshotDebounceTimer);
+  snapshotDebounceTimer=setTimeout(pushSharedSnapshot,160);
 }
 async function pushSharedSnapshot(){
   if(snapshotSending||location.protocol==="file:")return;
