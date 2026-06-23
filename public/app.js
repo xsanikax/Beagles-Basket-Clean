@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "87";
+const APP_VERSION = "88";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -230,4 +230,4 @@ $("#greeting").textContent=`A shared shopping adventure · v${APP_VERSION}`;if(i
 if(location.protocol!=="file:")initSharedState();
 function updateAppHeight(){document.documentElement?.style.setProperty("--app-height",`${globalThis.visualViewport?.height||globalThis.innerHeight||800}px`)}
 updateAppHeight();globalThis.visualViewport?.addEventListener?.("resize",updateAppHeight);globalThis.addEventListener?.("orientationchange",updateAppHeight);
-if("serviceWorker" in navigator&&(location.protocol==="https:"||location.hostname==="127.0.0.1"||location.hostname==="localhost"))navigator.serviceWorker.register("/service-worker.js").catch(()=>{});
+if("serviceWorker" in navigator&&(location.protocol==="https:"||location.hostname==="127.0.0.1"||location.hostname==="localhost"))navigator.serviceWorker.register("/service-worker.js").then(reg=>reg.update?.()).catch(()=>{});

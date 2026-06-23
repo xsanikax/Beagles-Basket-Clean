@@ -1,4 +1,4 @@
-const CACHE="beagles-basket-cloud-v87";
+const CACHE="beagles-basket-cloud-v88";
 const SHELL=["/styles.css?v=5","/rpg-theme.css?v=2","/manifest.webmanifest","/icon.svg","/icon-192.png","/icon-512.png"];
 
 self.addEventListener("install",event=>{
