@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "96";
+const APP_VERSION = "97";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -39,10 +39,9 @@ const CLIENT_ID_KEY="beagles-basket-client-id";
 const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
 let deferredRemote=null;
-let saveInFlight=false;
-let saveAgain=false;
-let hasUnsavedLocal=false;
-let saveRetryTimer;
+let actionQueue=[];
+let actionSending=false;
+let actionRetryTimer;
 let liveSocket=null;
 let liveSocketReady=false;
 let localMutation=0;
@@ -63,7 +62,7 @@ function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
   if(revision<=sharedRevision&&!allowDuringQueue)return false;
-  if((hasUnsavedLocal||saveInFlight)&&!allowDuringQueue){deferredRemote=remote;return false;}
+  if((actionQueue.length||actionSending)&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
   sharedReady=true;
@@ -77,41 +76,49 @@ function afterLocalAction(type,payload={}){
   state._lastLocalAction=type;
   state._clientId=clientId;
   state._clientMutation=++localMutation;
-  hasUnsavedLocal=true;
   saveLocal();
-  syncNow();
+  enqueueAction(type,payload);
 }
-function scheduleSharedSave(delay){
+function enqueueAction(type,payload={}){
   if(location.protocol==="file:")return;
-  clearTimeout(saveRetryTimer);
-  saveRetryTimer=setTimeout(syncNow,delay);
+  actionQueue.push({type,payload,actionId:makeId(),clientId,clientMutation:localMutation,createdAt:Date.now()});
+  flushActions();
 }
-async function saveSharedState(){
+function scheduleActionRetry(delay){
   if(location.protocol==="file:")return;
-  if(saveInFlight){saveAgain=true;return;}
-  if(!hasUnsavedLocal)return;
-  saveInFlight=true;
-  saveAgain=false;
+  clearTimeout(actionRetryTimer);
+  actionRetryTimer=setTimeout(flushActions,delay);
+}
+async function flushActions(){
+  if(location.protocol==="file:")return;
+  if(actionSending||!actionQueue.length)return;
+  actionSending=true;
   try{
-    const outgoing=sharedStateSnapshot();
-    const mutation=localMutation;
-    const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),clientMutation:mutation,state:outgoing})});
-    const remote=await response.json().catch(()=>null);
-    if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
-    sharedRevision=Number(remote?.revision)||sharedRevision;
-    sharedReady=true;
-    if(mutation===localMutation&&!saveAgain)hasUnsavedLocal=false;
+    while(actionQueue.length){
+      const action=actionQueue[0];
+      const response=await fetch("/api/action",{method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify(action)});
+      const remote=await response.json().catch(()=>null);
+      if(!response.ok)throw new Error(remote?.error||"Shared action failed");
+      actionQueue.shift();
+      applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
+    }
+    if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
   }catch(error){
-    console.warn("Shared state save failed",error);
-    scheduleSharedSave(900);
+    console.warn("Shared action failed",error);
+    scheduleActionRetry(900);
   }finally{
-    saveInFlight=false;
-    if(hasUnsavedLocal||saveAgain)scheduleSharedSave(0);
+    actionSending=false;
+    if(actionQueue.length)scheduleActionRetry(0);
   }
 }
 function syncNow(){
   if(location.protocol==="file:")return;
-  if(hasUnsavedLocal)saveSharedState();
+  flushActions();
+}
+async function seedSharedState(){
+  const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:sharedStateSnapshot()})});
+  const remote=await response.json().catch(()=>null);
+  if(response.ok&&remote?.state)applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
 }
 async function pullSharedState({force=false}={}){
   if(location.protocol==="file:")return;
@@ -120,7 +127,7 @@ async function pullSharedState({force=false}={}){
     if(!response.ok){console.warn("Shared list pull rejected",await response.text());return;}
     const remote=await response.json();
     if(remote.state){applyRemoteState(remote,{quiet:true});}
-    else if(force){saveLocal();afterLocalAction("initState");}
+    else if(force){saveLocal();await seedSharedState();}
     sharedReady=true;
   }catch(error){console.warn("Shared list pull failed",error);sharedReady=false;}
 }
@@ -151,7 +158,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!hasUnsavedLocal&&!saveInFlight)pullSharedState();},1000);}
+async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!actionQueue.length&&!actionSending)pullSharedState();},1000);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);

@@ -1,5 +1,5 @@
-const CACHE="beagles-basket-cloud-v96";
-const SHELL=["/","/index.html","/app.js?v=96","/styles.css?v=6","/rpg-theme.css?v=3","/manifest.webmanifest","/icon.svg","/icon-192.png","/icon-512.png"];
+const CACHE="beagles-basket-cloud-v97";
+const SHELL=["/","/index.html","/app.js?v=97","/styles.css?v=6","/rpg-theme.css?v=3","/manifest.webmanifest","/icon.svg","/icon-192.png","/icon-512.png"];
 
 self.addEventListener("install",event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting()));
