@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "95";
+const APP_VERSION = "96";
 const DAY = 86400000;
 const makeId=()=>globalThis.crypto?.randomUUID?.()||`bb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const clone=value=>globalThis.structuredClone?structuredClone(value):JSON.parse(JSON.stringify(value));
@@ -40,8 +40,9 @@ const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
 let deferredRemote=null;
 let saveInFlight=false;
+let saveAgain=false;
+let hasUnsavedLocal=false;
 let saveRetryTimer;
-let lastPushedFingerprint="";
 let liveSocket=null;
 let liveSocketReady=false;
 let localMutation=0;
@@ -57,17 +58,15 @@ function sharedStateSnapshot(){
   }
   return outgoing;
 }
-const sharedFingerprint=()=>JSON.stringify(sharedStateSnapshot());
 function actionPayloadBase(){return {clientId,createdAt:Date.now()};}
 function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
   if(revision<=sharedRevision&&!allowDuringQueue)return false;
-  if(sharedFingerprint()!==lastPushedFingerprint&&!allowDuringQueue){deferredRemote=remote;return false;}
+  if((hasUnsavedLocal||saveInFlight)&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
   sharedReady=true;
-  lastPushedFingerprint=sharedFingerprint();
   saveLocal();
   render();
   if(!quiet)toast("Shared list updated");
@@ -78,6 +77,7 @@ function afterLocalAction(type,payload={}){
   state._lastLocalAction=type;
   state._clientId=clientId;
   state._clientMutation=++localMutation;
+  hasUnsavedLocal=true;
   saveLocal();
   syncNow();
 }
@@ -88,29 +88,30 @@ function scheduleSharedSave(delay){
 }
 async function saveSharedState(){
   if(location.protocol==="file:")return;
-  const fingerprint=sharedFingerprint();
-  if(saveInFlight||fingerprint===lastPushedFingerprint)return;
+  if(saveInFlight){saveAgain=true;return;}
+  if(!hasUnsavedLocal)return;
   saveInFlight=true;
+  saveAgain=false;
   try{
     const outgoing=sharedStateSnapshot();
-    const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:outgoing})});
+    const mutation=localMutation;
+    const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),clientMutation:mutation,state:outgoing})});
     const remote=await response.json().catch(()=>null);
     if(!response.ok)throw new Error(remote?.error||"Shared state save failed");
     sharedRevision=Number(remote?.revision)||sharedRevision;
     sharedReady=true;
-    lastPushedFingerprint=fingerprint;
+    if(mutation===localMutation&&!saveAgain)hasUnsavedLocal=false;
   }catch(error){
     console.warn("Shared state save failed",error);
     scheduleSharedSave(900);
   }finally{
     saveInFlight=false;
-    if(sharedFingerprint()!==lastPushedFingerprint)scheduleSharedSave(0);
+    if(hasUnsavedLocal||saveAgain)scheduleSharedSave(0);
   }
 }
 function syncNow(){
   if(location.protocol==="file:")return;
-  if(sharedFingerprint()===lastPushedFingerprint)return;
-  saveSharedState();
+  if(hasUnsavedLocal)saveSharedState();
 }
 async function pullSharedState({force=false}={}){
   if(location.protocol==="file:")return;
@@ -133,8 +134,8 @@ function connectLiveState(){
       try{
         const data=JSON.parse(event.data||"{}");
         if(data.ack)return;
-        if(data.lastAction?.clientId===clientId&&Number(data.lastAction?.clientMutation||0)<localMutation)return;
-        if(data.state)applyRemoteState(data,{quiet:true,allowDuringQueue:data.lastAction?.clientId===clientId});
+        if(data.lastAction?.clientId===clientId)return;
+        if(data.state)applyRemoteState(data,{quiet:true});
       }catch{}
     });
     liveSocket.addEventListener("close",()=>{liveSocketReady=false;setTimeout(connectLiveState,1000);});
@@ -150,7 +151,7 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){lastPushedFingerprint=sharedFingerprint();await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!saveInFlight&&sharedFingerprint()===lastPushedFingerprint)pullSharedState();},1000);}
+async function initSharedState(){await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!hasUnsavedLocal&&!saveInFlight)pullSharedState();},1000);}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
