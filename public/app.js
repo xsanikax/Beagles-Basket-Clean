@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "104";
+const APP_VERSION = "105";
 const PENDING_STATE_KEY = "beagles-basket-pending-state-v1";
 const ACTION_QUEUE_KEY = "beagles-basket-action-queue-v1";
 const SYNC_TIMEOUT = 7000;
