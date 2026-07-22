@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "109";
+const APP_VERSION = "110";
 const PENDING_STATE_KEY = "beagles-basket-pending-state-v1";
 const ACTION_QUEUE_KEY = "beagles-basket-action-queue-v1";
 const SYNC_TIMEOUT = 7000;
@@ -37,6 +37,28 @@ const $ = s => document.querySelector(s);
 const isMobileViewport=()=>globalThis.matchMedia?.("(max-width: 800px)")?.matches??((globalThis.innerWidth||1024)<=800);
 const normalize = s => s.toLowerCase().trim().replace(/^\d+\s*/,"");
 const infoFor = name => catalog[normalize(name)] || ["Other","🛒"];
+const AISLES=[
+  ["Fruit & Veg",/\b(fruit|veg|vegetable|banana|apple|pear|orange|lemon|lime|grape|berry|berries|avocado|tomato|potato|onion|garlic|pepper|mushroom|salad|lettuce|spinach|cucumber|carrot|broccoli|cauliflower|cabbage|herb|ginger)\b/],
+  ["Bakery & Bread",/\b(bread|loaf|roll|bagel|wrap|pitta|croissant|bakery|cake|muffin|crumpet|teacake|pastry)\b/],
+  ["Meat & Fish",/\b(chicken|beef|pork|lamb|turkey|steak|mince|sausage|bacon|ham|salmon|prawn|cod|haddock|fresh fish|meat)\b/],
+  ["Dairy, Eggs & Chilled",/\b(milk|cheese|butter|yogurt|yoghurt|cream|egg|eggs|chilled|deli|hummus|pizza|ready meal|sandwich)\b/],
+  ["Cereal & Breakfast",/\b(cereal|porridge|oats|granola|muesli|breakfast|jam|marmalade|honey)\b/],
+  ["Beans & Tinned Fish",/\b(bean|beans|baked beans|tinned fish|canned fish|tuna|sardine|mackerel|anchov)\b/],
+  ["Tins, Soup & Packet Foods",/\b(tin|tinned|canned|soup|stock|gravy|packet|noodle|instant)\b/],
+  ["Pasta, Rice & Cooking Sauces",/\b(pasta|spaghetti|rice|couscous|quinoa|sauce|passata|pesto|curry|oil|vinegar|flour|sugar|baking)\b/],
+  ["Condiments & World Foods",/\b(ketchup|mayonnaise|mayo|mustard|pickle|chutney|relish|soy|seasoning|spice|world food|mexican|indian|chinese)\b/],
+  ["Biscuits, Crisps & Snacks",/\b(biscuit|cookie|cracker|crisp|snack|popcorn|chocolate|sweet|nuts|pretzel)\b/],
+  ["Tea, Coffee & Hot Drinks",/\b(tea|coffee|hot chocolate|cocoa)\b/],
+  ["Soft Drinks & Juice",/\b(drink|juice|squash|cola|lemonade|water|smoothie|fizzy)\b/],
+  ["Beer, Wine & Spirits",/\b(beer|lager|ale|cider|wine|prosecco|vodka|gin|rum|whisky|spirit)\b/],
+  ["Baby & Pet",/\b(baby|nappy|nappies|formula|cat|dog|pet|litter)\b/],
+  ["Household & Cleaning",/\b(clean|cleaner|bleach|detergent|laundry|washing|toilet|kitchen roll|foil|bin bag|sponge|dishwasher|household)\b/],
+  ["Health & Beauty",/\b(shampoo|conditioner|soap|shower|tooth|deodorant|razor|medicine|tablet|vitamin|beauty|health)\b/],
+  ["Frozen",/\b(frozen|ice cream|freezer)\b/]
+];
+const AISLE_NAMES=AISLES.map(([name])=>name).concat("Other");
+function aisleFor(item){const source=state.priceSources?.morrisons?.[normalize(item.name)];const text=normalize(`${item.name} ${source?.productName||""}`);if(/\b(frozen|ice cream|freezer)\b/.test(text))return "Frozen";return AISLES.find(([,pattern])=>pattern.test(text))?.[0]||({Produce:"Fruit & Veg",Bakery:"Bakery & Bread",Dairy:"Dairy, Eggs & Chilled",Pantry:"Pasta, Rice & Cooking Sauces"}[item.category]||"Other");}
+const aisleRank=item=>AISLE_NAMES.indexOf(aisleFor(item));
 function loadPendingSnapshot(){try{return JSON.parse(localStorage.getItem(PENDING_STATE_KEY)||"null");}catch{return null;}}
 let sharedReady=false;
 let sharedRevision=0;
@@ -226,10 +248,10 @@ function addItem(raw,chosenProduct=null){
   state.items.unshift(item);afterLocalAction("addItem",{name,key,amount,item:clone(item),chosenProduct,pricePatch:pricePatchForKey(key)});render();toast(`${name} added${state.selectedStore==="morrisons"&&!state.priceSources.morrisons[key]&&location.protocol!=="file:"?" · checking Morrisons…":""}`);queueMorrisonsRefresh(name);
 }
 function render(){
-  const visible=state.items.filter(i=>filter==="all"||i.category===filter).sort((a,b)=>Number(a.done)-Number(b.done)||(a.done?Number(b.completedAt||0)-Number(a.completedAt||0):0)); const done=state.items.filter(i=>i.done).length; const pct=state.items.length?Math.round(done/state.items.length*100):0;
+  const visible=state.items.filter(i=>filter==="all"||i.category===filter).sort((a,b)=>Number(a.done)-Number(b.done)||(a.done?Number(b.completedAt||0)-Number(a.completedAt||0):aisleRank(a)-aisleRank(b))); const done=state.items.filter(i=>i.done).length; const pct=state.items.length?Math.round(done/state.items.length*100):0;
   const basketItems=state.items; const priced=basketItems.filter(i=>unitPrice(i)!==null); const total=priced.reduce((sum,i)=>sum+unitPrice(i)*numericQty(i.qty),0); const storeName=state.selectedStore==="morrisons"?"Morrisons Gamston":"Asda West Bridgford";
   $("#item-count").textContent=state.items.filter(i=>!i.done).length; $("#progress-label").textContent=`${pct}% complete`; $("#progress-bar").style.width=`${pct}%`;
-  $("#shopping-list").innerHTML=visible.length?visible.map(i=>{const price=unitPrice(i);const source=state.priceSources[state.selectedStore]?.[normalize(i.name)];const match=source?.productName?`<span class="live-match">Matched: ${escapeHtml(source.productName)}${source.size?` · ${escapeHtml(source.size)}`:""}</span>`:"";return `<div class="item ${i.done?'done':''} ${i.id===recentlyMovedItemId?'just-moved':''}"><input class="check" type="checkbox" data-id="${i.id}" ${i.done?'checked':''}><div><div class="item-name">${infoFor(i.name)[1]} ${escapeHtml(i.name)}</div><div class="item-meta">${i.category} · added by ${i.addedBy}${match}</div></div><div class="item-actions"><button class="item-price ${price===null?'unpriced':''}" data-price="${i.id}" title="Set ${storeName} price">${price===null?'Set price':money(price*numericQty(i.qty))}</button><div class="qty-control" aria-label="Quantity for ${escapeHtml(i.name)}"><button data-qty-change="-1" data-item-id="${i.id}" aria-label="Decrease ${escapeHtml(i.name)} quantity">−</button><span>${escapeHtml(i.qty)}</span><button data-qty-change="1" data-item-id="${i.id}" aria-label="Increase ${escapeHtml(i.name)} quantity">+</button></div><button class="delete" data-delete="${i.id}" aria-label="Remove ${escapeHtml(i.name)} without marking it bought" title="Remove from list">×</button></div></div>`}).join(""):`<div class="empty">Your list is clear. Nicely done.</div>`;
+  let previousAisle="";$("#shopping-list").innerHTML=visible.length?visible.map(i=>{const aisle=i.done?"Completed":aisleFor(i);const heading=aisle!==previousAisle?`<div class="aisle-heading ${i.done?'completed-aisle':''}"><span>${i.done?'✓':'▸'}</span>${escapeHtml(aisle)}</div>`:"";previousAisle=aisle;const price=unitPrice(i);const source=state.priceSources[state.selectedStore]?.[normalize(i.name)];const match=source?.productName?`<span class="live-match">Matched: ${escapeHtml(source.productName)}${source.size?` · ${escapeHtml(source.size)}`:""}</span>`:"";return `${heading}<div class="item ${i.done?'done':''} ${i.id===recentlyMovedItemId?'just-moved':''}"><input class="check" type="checkbox" data-id="${i.id}" ${i.done?'checked':''}><div><div class="item-name">${infoFor(i.name)[1]} ${escapeHtml(i.name)}</div><div class="item-meta">${escapeHtml(aisle)} · added by ${i.addedBy}${match}</div></div><div class="item-actions"><button class="item-price ${price===null?'unpriced':''}" data-price="${i.id}" title="Set ${storeName} price">${price===null?'Set price':money(price*numericQty(i.qty))}</button><div class="qty-control" aria-label="Quantity for ${escapeHtml(i.name)}"><button data-qty-change="-1" data-item-id="${i.id}" aria-label="Decrease ${escapeHtml(i.name)} quantity">−</button><span>${escapeHtml(i.qty)}</span><button data-qty-change="1" data-item-id="${i.id}" aria-label="Increase ${escapeHtml(i.name)} quantity">+</button></div><button class="delete" data-delete="${i.id}" aria-label="Remove ${escapeHtml(i.name)} without marking it bought" title="Remove from list">×</button></div></div>`}).join(""):`<div class="empty">Your list is clear. Nicely done.</div>`;
   $("#store-select").value=state.selectedStore; $("#total-store").textContent=`${storeName} estimate`; $("#priced-status").textContent=`${priced.length} of ${basketItems.length} items priced`; $("#basket-total").textContent=money(total);
   const isMorrisons=state.selectedStore==="morrisons";const liveCount=state.items.filter(item=>state.priceSources.morrisons[normalize(item.name)]).length;const catalogCount=Object.keys(state.productCatalog.morrisons).length;const liveStatus=liveCount&&state.lastMorrisonsRefresh?`Live · ${liveCount}/${state.items.length} matched · ${catalogCount} products saved` :state.lastMorrisonsError?"Morrisons lookup failed · retry":"Morrisons online · not refreshed";$("#refresh-prices").hidden=!isMorrisons;$("#price-source").innerHTML=isMorrisons?`<i></i> ${liveStatus}`:`<i></i> Receipt-learned prices · tap to correct`;
   const recs=predict(); $("#recommendations").innerHTML=recs.length?recs.map(r=>`<div class="recommendation"><span class="rec-icon">${r.icon}</span><div><strong>${r.name}</strong><small>${r.due<=0?'Likely due now':`Likely in ${r.due} day${r.due===1?'':'s'}`} · every ${r.avg} days</small></div><button class="rec-add" data-add="${r.name}" aria-label="Add ${r.name}">+</button></div>`).join(""):`<p class="muted">You’re all caught up. New patterns will appear after more trips.</p>`;
