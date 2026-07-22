@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "110";
+const APP_VERSION = "111";
 const PENDING_STATE_KEY = "beagles-basket-pending-state-v1";
 const ACTION_QUEUE_KEY = "beagles-basket-action-queue-v1";
 const SYNC_TIMEOUT = 7000;
@@ -60,27 +60,23 @@ const AISLE_NAMES=AISLES.map(([name])=>name).concat("Other");
 function aisleFor(item){const source=state.priceSources?.morrisons?.[normalize(item.name)];const text=normalize(`${item.name} ${source?.productName||""}`);if(/\b(frozen|ice cream|freezer)\b/.test(text))return "Frozen";return AISLES.find(([,pattern])=>pattern.test(text))?.[0]||({Produce:"Fruit & Veg",Bakery:"Bakery & Bread",Dairy:"Dairy, Eggs & Chilled",Pantry:"Pasta, Rice & Cooking Sauces"}[item.category]||"Other");}
 const aisleRank=item=>AISLE_NAMES.indexOf(aisleFor(item));
 function loadPendingSnapshot(){try{return JSON.parse(localStorage.getItem(PENDING_STATE_KEY)||"null");}catch{return null;}}
+function loadActionQueue(){try{return JSON.parse(localStorage.getItem(ACTION_QUEUE_KEY)||"[]").filter(action=>action&&action.type&&action.actionId);}catch{return [];}}
 let sharedReady=false;
 let sharedRevision=0;
 const CLIENT_ID_KEY="beagles-basket-client-id";
 const clientId=localStorage.getItem(CLIENT_ID_KEY)||makeId();
 localStorage.setItem(CLIENT_ID_KEY,clientId);
 let deferredRemote=null;
-let publishInFlight=false;
-let publishDirty=false;
-let publishStartedAt=0;
-let publishTimer;
+let actionQueue=loadActionQueue();
+let actionSending=false;
+let actionRetryTimer;
 let liveSocket=null;
 let liveSocketReady=false;
 let localMutation=0;
 const saveLocal=()=>localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
 const save=saveLocal;
-async function fetchSync(url,options={}){
-  const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),SYNC_TIMEOUT);
-  try{return await fetch(url,{...options,signal:controller.signal});}
-  finally{clearTimeout(timer);}
-}
+const persistActionQueue=()=>localStorage.setItem(ACTION_QUEUE_KEY,JSON.stringify(actionQueue.slice(-80)));
+function compactPricePayload(payload={}){const compact=clone(payload);if(compact.productCatalog)compact.productCatalog={morrisons:{}};for(const store of Object.keys(compact.priceSources||{})){for(const key of Object.keys(compact.priceSources[store]||{})){if(Array.isArray(compact.priceSources[store][key]?.options))delete compact.priceSources[store][key].options;}}return compact;}
 function sharedStateSnapshot(){
   const outgoing=clone(state);
   outgoing.productCatalog={morrisons:{}};
@@ -91,11 +87,11 @@ function sharedStateSnapshot(){
   }
   return outgoing;
 }
-function applyRemoteState(remote,{quiet=true}={}){
+function applyRemoteState(remote,{quiet=true,allowDuringQueue=false}={}){
   if(!remote?.state)return false;
   const revision=Number(remote.revision)||0;
-  if(revision<=sharedRevision)return false;
-  if(publishInFlight||publishDirty){deferredRemote=remote;return false;}
+  if(revision<=sharedRevision&&!allowDuringQueue)return false;
+  if((actionQueue.length||actionSending)&&!allowDuringQueue){deferredRemote=remote;return false;}
   state=repairStateData(remote.state);
   sharedRevision=revision;
   sharedReady=true;
@@ -105,65 +101,51 @@ function applyRemoteState(remote,{quiet=true}={}){
   return true;
 }
 function afterLocalAction(type,payload={}){
+  if(type==="mergePriceData")payload=compactPricePayload(payload);
   state._localUpdatedAt=Date.now();
   state._lastLocalAction=type;
   state._clientId=clientId;
   state._clientMutation=++localMutation;
   saveLocal();
-  publishDirty=true;
-  localStorage.setItem(PENDING_STATE_KEY,JSON.stringify({state:sharedStateSnapshot(),clientMutation:localMutation,updatedAt:Date.now()}));
-  schedulePublish(0);
+  enqueueAction(type,payload);
 }
-function schedulePublish(delay=0){
+function enqueueAction(type,payload={}){
   if(location.protocol==="file:")return;
-  clearTimeout(publishTimer);
-  publishTimer=setTimeout(publishLatestState,delay);
+  const action={type,payload,actionId:makeId(),clientId,clientMutation:localMutation,createdAt:Date.now()};
+  if(type==="mergePriceData")actionQueue.push(action);else{const priceIndex=actionQueue.findIndex(item=>item.type==="mergePriceData");if(priceIndex>=0)actionQueue.splice(priceIndex,0,action);else actionQueue.push(action);}
+  persistActionQueue();
+  flushActions();
 }
-async function publishLatestState(){
+function scheduleActionRetry(delay){if(location.protocol==="file:")return;clearTimeout(actionRetryTimer);actionRetryTimer=setTimeout(flushActions,delay);}
+async function flushActions(){
   if(location.protocol==="file:")return;
-  if(publishInFlight){
-    if(Date.now()-publishStartedAt>SYNC_TIMEOUT+1000){publishInFlight=false;publishDirty=true;}
-    else return;
-  }
-  const pending=loadPendingSnapshot();
-  if(!publishDirty&&!pending)return;
-  publishInFlight=true;
-  publishStartedAt=Date.now();
-  publishDirty=false;
-  const snapshot=pending?.state?pending.state:sharedStateSnapshot();
-  const clientMutation=pending?.clientMutation||localMutation;
-  let failed=false;
+  if(actionSending||!actionQueue.length)return;
+  actionSending=true;
   try{
-    const response=await fetchSync("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,clientMutation,updatedAt:Date.now(),state:snapshot})});
-    const remote=await response.json().catch(()=>null);
-    if(!response.ok)throw new Error(remote?.error||"Shared publish failed");
-    const latestPending=loadPendingSnapshot();
-    if(!latestPending||latestPending.clientMutation===clientMutation)localStorage.removeItem(PENDING_STATE_KEY);
-    if(!publishDirty)applyRemoteState(remote,{quiet:true});
+    while(actionQueue.length){
+      const action=actionQueue[0];
+      const response=await fetch("/api/action",{method:"POST",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify(action)});
+      const remote=await response.json().catch(()=>null);
+      if(!response.ok){if(action.type==="mergePriceData"){console.warn("Dropping background price sync",remote?.error||response.status);actionQueue.shift();persistActionQueue();continue;}throw new Error(remote?.error||"Shared action failed");}
+      actionQueue.shift();persistActionQueue();applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
+    }
+    if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
   }catch(error){
-    console.warn("Shared publish failed",error);
-    failed=true;
-    publishDirty=true;
+    console.warn("Shared action failed",error);scheduleActionRetry(900);
   }finally{
-    publishInFlight=false;
-    publishStartedAt=0;
-    if(publishDirty||loadPendingSnapshot())schedulePublish(failed?900:0);
-    else if(deferredRemote){const latest=deferredRemote;deferredRemote=null;applyRemoteState(latest,{quiet:true});}
+    actionSending=false;if(actionQueue.length)scheduleActionRetry(0);
   }
 }
-function syncNow(){
-  if(location.protocol==="file:")return;
-  publishLatestState();
-}
+function syncNow(){if(location.protocol==="file:")return;flushActions();}
 async function seedSharedState(){
-  const response=await fetchSync("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:sharedStateSnapshot()})});
+  const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,updatedAt:Date.now(),state:sharedStateSnapshot()})});
   const remote=await response.json().catch(()=>null);
-  if(response.ok&&remote?.state)applyRemoteState(remote,{quiet:true});
+  if(response.ok&&remote?.state)applyRemoteState(remote,{quiet:true,allowDuringQueue:true});
 }
 async function pullSharedState({force=false}={}){
   if(location.protocol==="file:")return;
   try{
-    const response=await fetchSync("/api/state",{cache:"no-store",headers:{"cache-control":"no-cache"}});
+    const response=await fetch("/api/state",{cache:"no-store",headers:{"cache-control":"no-cache"}});
     if(!response.ok){console.warn("Shared list pull rejected",await response.text());return;}
     const remote=await response.json();
     if(remote.state){applyRemoteState(remote,{quiet:true});}
@@ -181,6 +163,7 @@ function connectLiveState(){
       try{
         const data=JSON.parse(event.data||"{}");
         if(data.ack)return;
+        if(data.lastAction?.clientId===clientId)return;
         if(data.state)applyRemoteState(data,{quiet:true});
       }catch{}
     });
@@ -197,7 +180,8 @@ function connectLiveState(){
   events.onerror=()=>{sharedReady=false;setTimeout(()=>pullSharedState(),1000);};
   events.onopen=()=>{sharedReady=true;};
 }
-async function initSharedState(){localStorage.removeItem(ACTION_QUEUE_KEY);if(loadPendingSnapshot())publishDirty=true;await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!publishDirty&&!publishInFlight)pullSharedState();},1000);globalThis.addEventListener?.("online",()=>schedulePublish(0));document.addEventListener?.("visibilitychange",()=>{if(!document.hidden)schedulePublish(0);});}
+async function recoverPendingState(){const pending=loadPendingSnapshot();if(!pending?.state)return;try{const currentResponse=await fetch("/api/state",{cache:"no-store",headers:{"cache-control":"no-cache"}});const current=await currentResponse.json();const pendingTime=Number(pending.state._localUpdatedAt||pending.updatedAt||0);const currentTime=Number(current.state?._localUpdatedAt||0);if(pendingTime>currentTime){const response=await fetch("/api/state",{method:"PUT",headers:{"content-type":"application/json"},cache:"no-store",body:JSON.stringify({clientId,clientMutation:pending.clientMutation,updatedAt:Date.now(),state:pending.state})});const recovered=await response.json().catch(()=>null);if(!response.ok)throw new Error(recovered?.error||"Pending recovery failed");applyRemoteState(recovered,{quiet:true,allowDuringQueue:true});}localStorage.removeItem(PENDING_STATE_KEY);}catch(error){console.warn("Pending state recovery failed",error);}}
+async function initSharedState(){await recoverPendingState();await pullSharedState({force:true});connectLiveState();setInterval(()=>{syncNow();if(!actionQueue.length&&!actionSending)pullSharedState();},1000);globalThis.addEventListener?.("online",()=>flushActions());document.addEventListener?.("visibilitychange",()=>{if(!document.hidden){flushActions();pullSharedState();}});}
 const numericQty = qty => Math.max(1,Number.parseInt(qty,10)||1);
 const unitPrice = item => state.prices[state.selectedStore]?.[normalize(item.name)] ?? null;
 const money = amount => new Intl.NumberFormat("en-GB",{style:"currency",currency:"GBP"}).format(amount);
