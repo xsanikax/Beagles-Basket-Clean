@@ -1,5 +1,5 @@
 const STORAGE_KEY = "basketly-v1";
-const APP_VERSION = "106";
+const APP_VERSION = "107";
 const PENDING_STATE_KEY = "beagles-basket-pending-state-v1";
 const ACTION_QUEUE_KEY = "beagles-basket-action-queue-v1";
 const SYNC_TIMEOUT = 7000;
@@ -225,7 +225,7 @@ function addItem(raw,chosenProduct=null){
   state.items.unshift(item);afterLocalAction("addItem",{name,key,amount,item:clone(item),chosenProduct,pricePatch:pricePatchForKey(key)});render();toast(`${name} added${state.selectedStore==="morrisons"&&!state.priceSources.morrisons[key]&&location.protocol!=="file:"?" · checking Morrisons…":""}`);queueMorrisonsRefresh(name);
 }
 function render(){
-  const visible=state.items.filter(i=>filter==="all"||i.category===filter); const done=state.items.filter(i=>i.done).length; const pct=state.items.length?Math.round(done/state.items.length*100):0;
+  const visible=state.items.filter(i=>filter==="all"||i.category===filter).sort((a,b)=>Number(a.done)-Number(b.done)); const done=state.items.filter(i=>i.done).length; const pct=state.items.length?Math.round(done/state.items.length*100):0;
   const basketItems=state.items; const priced=basketItems.filter(i=>unitPrice(i)!==null); const total=priced.reduce((sum,i)=>sum+unitPrice(i)*numericQty(i.qty),0); const storeName=state.selectedStore==="morrisons"?"Morrisons Gamston":"Asda West Bridgford";
   $("#item-count").textContent=state.items.filter(i=>!i.done).length; $("#progress-label").textContent=`${pct}% complete`; $("#progress-bar").style.width=`${pct}%`;
   $("#shopping-list").innerHTML=visible.length?visible.map(i=>{const price=unitPrice(i);const source=state.priceSources[state.selectedStore]?.[normalize(i.name)];const match=source?.productName?`<span class="live-match">Matched: ${escapeHtml(source.productName)}${source.size?` · ${escapeHtml(source.size)}`:""}</span>`:"";return `<div class="item ${i.done?'done':''}"><input class="check" type="checkbox" data-id="${i.id}" ${i.done?'checked':''}><div><div class="item-name">${infoFor(i.name)[1]} ${escapeHtml(i.name)}</div><div class="item-meta">${i.category} · added by ${i.addedBy}${match}</div></div><div class="item-actions"><button class="item-price ${price===null?'unpriced':''}" data-price="${i.id}" title="Set ${storeName} price">${price===null?'Set price':money(price*numericQty(i.qty))}</button><div class="qty-control" aria-label="Quantity for ${escapeHtml(i.name)}"><button data-qty-change="-1" data-item-id="${i.id}" aria-label="Decrease ${escapeHtml(i.name)} quantity">−</button><span>${escapeHtml(i.qty)}</span><button data-qty-change="1" data-item-id="${i.id}" aria-label="Increase ${escapeHtml(i.name)} quantity">+</button></div><button class="delete" data-delete="${i.id}" aria-label="Remove ${escapeHtml(i.name)} without marking it bought" title="Remove from list">×</button></div></div>`}).join(""):`<div class="empty">Your list is clear. Nicely done.</div>`;
@@ -304,4 +304,4 @@ $("#greeting").textContent=`A shared shopping adventure · v${APP_VERSION}`;if(i
 if(location.protocol!=="file:")initSharedState();
 function updateAppHeight(){document.documentElement?.style.setProperty("--app-height",`${globalThis.visualViewport?.height||globalThis.innerHeight||800}px`)}
 updateAppHeight();globalThis.visualViewport?.addEventListener?.("resize",updateAppHeight);globalThis.addEventListener?.("orientationchange",updateAppHeight);
-if("serviceWorker" in navigator&&(location.protocol==="https:"||location.hostname==="127.0.0.1"||location.hostname==="localhost"))navigator.serviceWorker.register("/service-worker.js").then(reg=>reg.update?.()).catch(()=>{});
+if("serviceWorker" in navigator&&(location.protocol==="https:"||location.hostname==="127.0.0.1"||location.hostname==="localhost"))navigator.serviceWorker.register("/service-worker.js",{updateViaCache:"none"}).then(reg=>reg.update?.()).catch(()=>{});
